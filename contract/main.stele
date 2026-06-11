@@ -1,0 +1,51 @@
+(import "./proposals/agent-additions.stele")
+; ============================================================================
+; postern — Stele contract (entry file)
+;
+; This is the source of truth for the rules an agent CANNOT silently break.
+; It is currently a PLACEHOLDER: no real invariants are declared yet.
+;
+; How it works:
+;   - Each (invariant ...) form you add becomes a generated cargo test.
+;   - `stele generate`  turns the rules in this file into tests/contract/*.rs
+;   - `cargo test`      runs those generated tests
+;   - `stele lock`      snapshots SHA-256 of every protected file
+;   - `stele check`     proves the contract + protected files are intact (exit 0)
+;
+; The Claude Code plugin (see CLAUDE.md) blocks any agent edit to this file and
+; to everything under contract/ and tests/contract/ — changes go through a human.
+;
+; Grammar + operators: /home/bot/project/stele/docs/spec/cdl.md
+;   eq / gt / gte / lt / lte / in / matches / forall / exists / where / sum /
+;   avg / and / or / not / implies / ...
+; ============================================================================
+
+(metadata
+  (stele-version "0.1")
+  (project "postern"))
+
+; ----------------------------------------------------------------------------
+; Add your invariants below. Two shapes are available for the Rust backend:
+;
+;   1. (assert <expr>)     — a predicate over runtime data wired in
+;                            tests/contract/mod.rs; becomes a #[test].
+;        (invariant EXAMPLE_NAME
+;          (severity error)
+;          (description "...")
+;          (assert (gte (path some field) 0)))
+;
+;   2. (uses-checker <id>) — your own Rust checker for arbitrary structural
+;                            checks; implement it under contract/checker_impls/.
+;        (invariant EXAMPLE_STRUCTURAL
+;          (severity error)
+;          (description "...")
+;          (uses-checker my-checker))
+;
+; NOTE on Rust support: the value/structural mechanisms above work today. The
+; declarative static mechanisms (trace-policy, effect-policy, type-state,
+; code-shape, architecture, branded-id) are TypeScript/Python-only right now and
+; will FAIL CLOSED (a `*_unsupported_language` error) if declared for a Rust
+; target — express those rules as `uses-checker` Rust checkers instead.
+; ----------------------------------------------------------------------------
+
+; (no invariants yet — add the first one here)

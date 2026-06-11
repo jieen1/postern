@@ -1,0 +1,22 @@
+{
+  "version": "0.1",
+  "contractDir": "contract",
+  "entry": "contract/main.stele",
+  "generatedDir": "tests/contract",
+  "checkerImplDir": "contract/checker_impls",
+  "manifestPath": "contract/.manifest.json",
+  "targetLanguage": "rust",
+  "testFramework": "cargo-test",
+  "pathMode": "auto",
+  "protected": [
+    "contract/**/*.stele",
+    "contract/checker_impls/**/*",
+    "contract/.baseline.json",
+    "contract/.manifest.json",
+    "contract/design/**/*",
+    "contract/generated/**/*",
+    "tests/contract/**/*",
+    "stele.config.json",
+    ".stele/stop-state.json"
+  ]
+}

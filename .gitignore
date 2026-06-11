@@ -1,0 +1,17 @@
+# Stele
+contract/.manifest.json
+contract/.baseline.json
+contract/.unlock-log.jsonl
+contract/.last-check-report.json
+# NOTE: contract/proposals/ is intentionally tracked — applied agent proposals
+# (agent-additions.stele) are contract source consumed by `stele generate`.
+
+# Generated tests
+tests/contract/
+
+# Local events
+.stele/events/
+
+# Build artifacts
+/target/
+/.stele_fixture.json
