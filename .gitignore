@@ -15,3 +15,6 @@ tests/contract/
 # Build artifacts
 /target/
 /.stele_fixture.json
+
+# CodeGraph index
+.codegraph/
