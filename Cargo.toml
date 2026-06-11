@@ -1,5 +1,5 @@
 [package]
-name = "stele-contracts"
+name = "postern-contracts"
 version = "0.1.0"
 edition = "2021"
 build = "build.rs"

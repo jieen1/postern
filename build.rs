@@ -50,7 +50,10 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-changed=contract/sql-exceptions.json");
-    // Watch crates/ and every subdirectory so a new nested source file retriggers
+    // Unconditionally watch crates/ even before it exists — cargo retriggers when
+    // the path appears, closing the "first creation of crates/" staleness gap.
+    println!("cargo:rerun-if-changed=crates");
+    // Watch every existing subdirectory so a new nested source file retriggers
     // the scan (a bare directory watch misses deep additions — contracts SEC-7).
     rerun_dirs(Path::new("crates"));
 
@@ -91,8 +94,8 @@ fn main() {
             scan_default_scope(&fix_unscoped(), &[]),
         )),
         ("raw_sql", rule(
-            scan_raw_sql(&rs, &exceptions),
-            scan_raw_sql(&fix_raw_sql(), &exceptions),
+            scan_raw_sql(&rs, &manifests, &exceptions),
+            scan_raw_sql(&fix_raw_sql(), &fix_raw_sql_manifest(), &exceptions),
         )),
         ("pagination", rule(
             scan_pagination(&rs, &sql),
@@ -190,7 +193,9 @@ fn scan_default_scope(rs: &[SrcFile], sql: &[SrcFile]) -> usize {
             continue;
         }
         for stmt in sql_statements(c) {
-            if stmt.contains("SELECT ") && !stmt.contains("DELETE_FLAG = 0") {
+            // Whitespace-insensitive predicate match (delete_flag=0 and
+            // delete_flag = 0 are equivalent).
+            if stmt.contains("SELECT ") && !compact_ws(&stmt).contains("DELETE_FLAG=0") {
                 count += 1;
             }
         }
@@ -198,41 +203,80 @@ fn scan_default_scope(rs: &[SrcFile], sql: &[SrcFile]) -> usize {
     count
 }
 
-/// DB_NO_RAW_SQL_OUTSIDE_STORE: SQL markers / rusqlite outside postern-store,
+/// DB_NO_RAW_SQL_OUTSIDE_STORE: SQL markers / rusqlite outside postern-store
+/// (source references AND Cargo.toml dependency declarations of rusqlite/sqlparser),
 /// unless the file is registered (by exact normalized path) in
 /// contract/sql-exceptions.json.
-fn scan_raw_sql(files: &[SrcFile], exceptions: &[String]) -> usize {
+fn scan_raw_sql(files: &[SrcFile], manifests: &[SrcFile], exceptions: &[String]) -> usize {
     const MARKERS: [&str; 6] =
         ["SELECT ", "INSERT INTO", "UPDATE ", "DELETE FROM", "CREATE TABLE", "RUSQLITE"];
-    files
+    const SQL_CRATES: [&str; 2] = ["rusqlite", "sqlparser"];
+    let exempt = |p: &str| exceptions.iter().any(|e| e == p);
+    let src = files
         .iter()
         .filter(|(p, c)| {
-            !in_store(p)
-                && !exceptions.iter().any(|e| e == p.as_str())
-                && {
-                    let sql = sql_norm(c);
-                    MARKERS.iter().any(|m| sql.contains(m))
-                }
+            !in_store(p) && !exempt(p) && {
+                let sql = sql_norm(c);
+                MARKERS.iter().any(|m| sql.contains(m))
+            }
         })
-        .count()
+        .count();
+    // SQL engine crates must not be declared as a dependency outside the store crate.
+    let dep = manifests
+        .iter()
+        .filter(|(p, c)| {
+            in_crate_manifest_outside_store(p)
+                && !exempt(p)
+                && toml_dependencies(c).iter().any(|d| SQL_CRATES.contains(&d.as_str()))
+        })
+        .count();
+    src + dep
 }
 
-/// DB_PAGINATION_MANDATORY: collection SELECT statements (not single-row by id,
-/// not COUNT) must be LIMIT-bounded.
+/// DB_PAGINATION_MANDATORY: collection SELECT statements (not a pure aggregate,
+/// not a single-row primary-key lookup) must be LIMIT-bounded. Exemptions are
+/// anchored so they cannot be smuggled by an embedded COUNT() subquery or a
+/// `WHERE id = ?` clause attached to a UNION/JOIN collection query.
 fn scan_pagination(rs: &[SrcFile], sql: &[SrcFile]) -> usize {
     let mut count = 0;
     for (_, c) in rs.iter().chain(sql.iter()) {
         for stmt in sql_statements(c) {
-            if stmt.contains("SELECT ")
-                && !stmt.contains("LIMIT")
-                && !stmt.contains("COUNT(")
-                && !stmt.contains("WHERE ID = ?")
-            {
+            if stmt.contains("SELECT ") && !pagination_ok(&stmt) {
                 count += 1;
             }
         }
     }
     count
+}
+
+fn pagination_ok(stmt: &str) -> bool {
+    if stmt.contains("LIMIT") {
+        return true;
+    }
+    // Pure aggregate: the projection (between the first SELECT and FROM) is a
+    // single COUNT(...) with no other selected columns.
+    if let Some(proj) = projection_of(stmt) {
+        if proj.trim_start().starts_with("COUNT(") && !proj.contains(',') {
+            return true;
+        }
+    }
+    // Single-row primary-key lookup, with no set/join operation that would turn
+    // it back into a collection query.
+    let compact = compact_ws(stmt);
+    if compact.contains("WHEREID=?")
+        && !stmt.contains("UNION")
+        && !stmt.contains(" JOIN ")
+    {
+        return true;
+    }
+    false
+}
+
+/// Projection substring between the first "SELECT " and the next " FROM ".
+fn projection_of(stmt: &str) -> Option<String> {
+    let s = stmt.find("SELECT ")? + "SELECT ".len();
+    let f = stmt[s..].find(" FROM ")? + s;
+    Some(stmt[s..f].to_string())
 }
 
 // ============================================================ dependency scanners
@@ -296,8 +340,8 @@ fn scan_admin(rs: &[SrcFile], sql: &[SrcFile]) -> usize {
     count
 }
 
-/// SECRET_TYPE_DISCIPLINE: ResolvedTarget / ResourceCredential must not derive
-/// Clone or Serialize (their values must never be copied or serialized).
+/// SECRET_TYPE_DISCIPLINE: ResolvedTarget / ResourceCredential must not gain
+/// Clone or Serialize — neither by derive nor by hand-written impl.
 fn scan_secret_derives(rs: &[SrcFile]) -> usize {
     const SECRET_TYPES: [&str; 2] = ["ResolvedTarget", "ResourceCredential"];
     let mut count = 0;
@@ -311,16 +355,40 @@ fn scan_secret_derives(rs: &[SrcFile]) -> usize {
                     || def.starts_with(&format!("enum {t}"))
                     || def.starts_with(&format!("pub enum {t}"))
             });
-            if !is_def {
-                continue;
+            if is_def {
+                // Walk upward over contiguous attribute/comment/blank lines to
+                // capture the full (possibly multi-line) derive block — not a
+                // fixed 4-line window.
+                let mut j = i;
+                while j > 0 {
+                    let prev = lines[j - 1].trim_start();
+                    if prev.starts_with("#[")
+                        || prev.starts_with("//")
+                        || prev.is_empty()
+                        || prev.starts_with(')')
+                        || prev.starts_with(',')
+                        || prev.ends_with(',')
+                    {
+                        j -= 1;
+                    } else {
+                        break;
+                    }
+                }
+                let preamble = lines[j..i].join(" ");
+                if preamble.contains("derive")
+                    && (preamble.contains("Clone") || preamble.contains("Serialize"))
+                {
+                    count += 1;
+                }
             }
-            // Inspect the few lines above for a derive attribute.
-            let start = i.saturating_sub(4);
-            let preamble = lines[start..i].join(" ");
-            if preamble.contains("derive")
-                && (preamble.contains("Clone") || preamble.contains("Serialize"))
-            {
-                count += 1;
+        }
+        // Hand-written impls bypass derive entirely — flag them too.
+        let body = strip_line_comments_rs(c);
+        for t in SECRET_TYPES {
+            for tr in ["Clone", "Serialize"] {
+                if body.contains(&format!("impl {tr} for {t}")) {
+                    count += 1;
+                }
             }
         }
     }
@@ -354,15 +422,25 @@ fn scan_construction_sites(rs: &[SrcFile]) -> usize {
 /// EVAL_NO_ERROR_SWALLOWING: the evaluation path (core::eval, daemon::kernel)
 /// must not swallow errors into an allow/default.
 fn scan_error_swallow(rs: &[SrcFile]) -> usize {
-    const BAD: [&str; 3] = [".unwrap_or(true)", ".ok()", ".unwrap_or_default()"];
+    // Whitespace-folded so `unwrap_or( true )` / `unwrap_or_else(|_| true)`
+    // variants cannot dodge via spacing. This contract covers these textual
+    // swallow shapes on the eval path; subtler swallows are caught by the
+    // clippy deny list (unwrap_used/expect_used) — see detailed design 7.1/7.3.
+    const BAD: [&str; 5] = [
+        ".unwrap_or(true)",
+        ".ok()",
+        ".unwrap_or_default()",
+        ".unwrap_or_else(|_|true)",
+        ".unwrap_or_else(||true)",
+    ];
     let mut count = 0;
     for (p, c) in rs {
         if !on_eval_path(p) {
             continue;
         }
-        let body = strip_line_comments_rs(c);
+        let body = compact_ws(&strip_line_comments_rs(c).to_ascii_uppercase());
         for pat in BAD {
-            count += body.matches(pat).count();
+            count += body.matches(&pat.to_ascii_uppercase()).count();
         }
     }
     count
@@ -436,11 +514,24 @@ fn fix_raw_sql() -> Vec<SrcFile> {
         ("crates/postern-adapters/src/d.rs", "use rusqlite::Connection;"),
     ])
 }
-fn fix_unbounded() -> Vec<SrcFile> {
+fn fix_raw_sql_manifest() -> Vec<SrcFile> {
+    // rusqlite declared as a dependency outside the store crate (r2 F2).
     fix(&[(
-        "crates/postern-store/src/base/u.rs",
-        r#"q("SELECT id FROM temp_grants WHERE principal_id = ?1")"#,
+        "crates/postern-adapters/Cargo.toml",
+        "[package]\nname = \"postern-adapters\"\n[dependencies]\nrusqlite = \"0.31\"",
     )])
+}
+fn fix_unbounded() -> Vec<SrcFile> {
+    // Plain unbounded + the two smuggle shapes round-2 found (COUNT subquery and
+    // WHERE id = ? attached to a UNION) — all must still be flagged (r2 F1).
+    fix(&[
+        ("crates/postern-store/src/policy/u.rs",
+            r#"q("SELECT id FROM temp_grants WHERE principal_id = ?1")"#),
+        ("crates/postern-store/src/policy/v.rs",
+            r#"q("SELECT id, (SELECT COUNT(*) FROM t2) FROM big_table")"#),
+        ("crates/postern-store/src/policy/w.rs",
+            r#"q("SELECT * FROM grants WHERE id = ? UNION SELECT * FROM more")"#),
+    ])
 }
 fn fix_id_dep() -> Vec<SrcFile> {
     fix(&[
@@ -456,10 +547,13 @@ fn fix_admin() -> Vec<SrcFile> {
     ])
 }
 fn fix_secret_derive() -> Vec<SrcFile> {
-    fix(&[(
-        "crates/postern-secrets/src/types.rs",
-        "#[derive(Clone, Debug)]\npub struct ResolvedTarget { host: String }",
-    )])
+    // derive form + hand-written impl form (r2 F3) — both must be flagged.
+    fix(&[
+        ("crates/postern-secrets/src/types.rs",
+            "#[derive(Clone, Debug)]\npub struct ResolvedTarget { host: String }"),
+        ("crates/postern-secrets/src/impls.rs",
+            "impl Clone for ResourceCredential { fn clone(&self) -> Self { todo!() } }"),
+    ])
 }
 fn fix_construction() -> Vec<SrcFile> {
     fix(&[
@@ -474,10 +568,11 @@ fn fix_forbidden_edge() -> Vec<SrcFile> {
     )])
 }
 fn fix_error_swallow() -> Vec<SrcFile> {
-    fix(&[(
-        "crates/postern-core/src/eval/e.rs",
-        "let ok = check(req).unwrap_or(true);",
-    )])
+    // unwrap_or(true) + unwrap_or_else(|_| true) variant (r2 F4).
+    fix(&[
+        ("crates/postern-core/src/eval/e.rs", "let ok = check(req).unwrap_or(true);"),
+        ("crates/postern-core/src/eval/f.rs", "let ok = check(req).unwrap_or_else(|_| true);"),
+    ])
 }
 
 // ============================================================ text helpers
@@ -486,6 +581,12 @@ fn fix_error_swallow() -> Vec<SrcFile> {
 /// layout-insensitive keyword matching.
 fn sql_norm(s: &str) -> String {
     fold_ws(&strip_sql_comments(s)).to_ascii_uppercase()
+}
+
+/// All whitespace removed (already-normalized SQL), for operator-spacing-
+/// insensitive predicate matching (`delete_flag = 0` ≡ `delete_flag=0`).
+fn compact_ws(s: &str) -> String {
+    s.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
 /// Split normalized SQL into statements on ';' for per-statement predicates.
@@ -583,9 +684,21 @@ fn is_ident(b: u8) -> bool {
 }
 
 /// Body of a Rust `enum <name> { ... }` (best-effort, first match).
+/// The match is word-bounded so `enum Capability` does not also match
+/// `enum CapabilityKind` (contracts r2 F5).
 fn enum_body(s: &str, name: &str) -> Option<String> {
     let needle = format!("enum {name}");
-    let start = s.find(&needle)?;
+    let nb = needle.len();
+    let mut from = 0;
+    let start = loop {
+        let pos = s[from..].find(&needle)? + from;
+        let after = pos + nb;
+        let boundary = s.as_bytes().get(after).map(|b| !is_ident(*b)).unwrap_or(true);
+        if boundary {
+            break pos;
+        }
+        from = pos + 1;
+    };
     let brace = s[start..].find('{')? + start;
     let mut depth = 0i32;
     let bytes = s.as_bytes();
@@ -623,6 +736,10 @@ fn in_daemon_shells(p: &str) -> bool {
 }
 fn on_eval_path(p: &str) -> bool {
     p.contains("crates/postern-core/src/eval/") || p.contains("crates/postern-daemon/src/kernel/")
+}
+/// A crate manifest (crates/<x>/Cargo.toml) belonging to a crate other than the store.
+fn in_crate_manifest_outside_store(p: &str) -> bool {
+    p.ends_with("Cargo.toml") && p.contains("crates/") && !p.contains("crates/postern-store/")
 }
 
 // ============================================================ TOML helpers
