@@ -1,14 +1,14 @@
 {
   "version": "1",
-  "generated_at": "2026-06-11T13:03:57.473Z",
+  "generated_at": "2026-06-11T13:44:50.469Z",
   "stele_version": "0.1.0",
   "backend": "rust",
   "operator_registry_hash": "5b9a125e10ae70fc2e13ec59e698e58eb05817a6047e22d8fe67dd96c794d3a4",
-  "config_hash": "43ffc71c2f28e4d130b8b1ce923804518cef0c490073f08f1cbc9debf05ef17c",
+  "config_hash": "7142c5831a2a57f41a657d6ed2e8d06ff64cf580c8c86407e2dd64c90e0c8fc1",
   "files": {
     "contract/main.stele": {
       "own_hash": "7cb4ee5b30d0ab1e1bafad0cb419ca225bd6892eeaa21389ca09658e92b00595",
-      "transitive_hash": "fa14c302ec1d86a58bd51a0c95463b1db27582dd3e9d667d7a2170f4fda5941f",
+      "transitive_hash": "cacf7fbb8d04cfae1df4c535dbd378be212af28b0a30e0960412956102e9e798",
       "deps": [
         "contract/proposals/agent-additions.stele"
       ],
@@ -16,8 +16,8 @@
       "output_hashes": {}
     },
     "contract/proposals/agent-additions.stele": {
-      "own_hash": "f405272965fe43ab6c60d878699508b3ece281cad0565d3c9745512a8f4cfc06",
-      "transitive_hash": "0460c8e9d6e1d5bf9c9c8caa3bd685e445ed7541ea100d93bebca95ae5132fbb",
+      "own_hash": "ffef42e23303bb4499619b2d79744f550dae69c585ed4caa2c1fabc8ce06307c",
+      "transitive_hash": "3ca0ecb6aa2c8b0da0dd1a3e76188363c16497145968bf6a615371f043b84b6b",
       "deps": [],
       "output_paths": [],
       "output_hashes": {}
@@ -25,6 +25,6 @@
   },
   "output_hashes_global": {
     "tests/contract/_stele_runtime.rs": "7f011db3515eca0f84054c27263f04d07ac076aa4a4ecc41a086893ffa4d1820",
-    "tests/contract/test_contract.rs": "2c056798a483fd1d0242255318d367af0e0014579f44d6d133d1441e181a8c98"
+    "tests/contract/test_contract.rs": "81327dbbc1d8cc01ea61ebf6ff3c807c863a8c4d174f637f5cb017f1d0ba9c6a"
   }
 }

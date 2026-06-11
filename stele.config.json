@@ -15,8 +15,11 @@
     "contract/.manifest.json",
     "contract/design/**/*",
     "contract/generated/**/*",
+    "contract/sql-exceptions.json",
     "tests/contract/**/*",
     "stele.config.json",
+    "build.rs",
+    "Cargo.toml",
     ".stele/stop-state.json"
   ]
 }
