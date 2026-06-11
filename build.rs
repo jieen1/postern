@@ -260,13 +260,18 @@ fn pagination_ok(stmt: &str) -> bool {
             return true;
         }
     }
-    // Single-row primary-key lookup, with no set/join operation that would turn
-    // it back into a collection query.
+    // Single-row primary-key lookup — POSITIVE whitelist: exempt only when the
+    // statement is a single SELECT against a single table guarded by `id = ?`,
+    // with NO construct that re-widens it into a collection query. Blacklisting
+    // a couple of operators is not enough (round-3 SCAN-1): set operators
+    // (UNION/INTERSECT/EXCEPT), any JOIN, a comma cross-join in FROM, an OR /
+    // IN / subquery in WHERE all turn it back into an unbounded scan.
     let compact = compact_ws(stmt);
-    if compact.contains("WHEREID=?")
-        && !stmt.contains("UNION")
-        && !stmt.contains(" JOIN ")
-    {
+    let single_select = stmt.matches("SELECT ").count() == 1; // no sub-SELECT / IN(SELECT ...)
+    let no_set_op = !stmt.contains("UNION") && !stmt.contains("INTERSECT") && !stmt.contains("EXCEPT");
+    let no_join = !stmt.contains(" JOIN ") && !from_clause_has_comma(stmt);
+    let no_or = !stmt.contains(" OR ");
+    if compact.contains("WHEREID=?") && single_select && no_set_op && no_join && no_or {
         return true;
     }
     false
@@ -277,6 +282,19 @@ fn projection_of(stmt: &str) -> Option<String> {
     let s = stmt.find("SELECT ")? + "SELECT ".len();
     let f = stmt[s..].find(" FROM ")? + s;
     Some(stmt[s..f].to_string())
+}
+
+/// True if the FROM clause (between " FROM " and the next clause keyword) lists
+/// more than one table via a comma — a SQL-89 cross join.
+fn from_clause_has_comma(stmt: &str) -> bool {
+    let Some(s) = stmt.find(" FROM ").map(|i| i + " FROM ".len()) else { return false };
+    let tail = &stmt[s..];
+    let end = ["  WHERE ", " WHERE ", " GROUP ", " ORDER ", " HAVING ", " LIMIT ", " UNION ", " ON "]
+        .iter()
+        .filter_map(|kw| tail.find(kw))
+        .min()
+        .unwrap_or(tail.len());
+    tail[..end].contains(',')
 }
 
 // ============================================================ dependency scanners
@@ -422,17 +440,10 @@ fn scan_construction_sites(rs: &[SrcFile]) -> usize {
 /// EVAL_NO_ERROR_SWALLOWING: the evaluation path (core::eval, daemon::kernel)
 /// must not swallow errors into an allow/default.
 fn scan_error_swallow(rs: &[SrcFile]) -> usize {
-    // Whitespace-folded so `unwrap_or( true )` / `unwrap_or_else(|_| true)`
-    // variants cannot dodge via spacing. This contract covers these textual
-    // swallow shapes on the eval path; subtler swallows are caught by the
-    // clippy deny list (unwrap_used/expect_used) — see detailed design 7.1/7.3.
-    const BAD: [&str; 5] = [
-        ".unwrap_or(true)",
-        ".ok()",
-        ".unwrap_or_default()",
-        ".unwrap_or_else(|_|true)",
-        ".unwrap_or_else(||true)",
-    ];
+    // Whitespace-folded so `unwrap_or( true )` variants cannot dodge via spacing.
+    // This contract covers these textual swallow shapes on the eval path; subtler
+    // swallows are caught by the clippy deny list — see detailed design 7.1/7.3.
+    const BAD: [&str; 3] = [".UNWRAP_OR(TRUE)", ".OK()", ".UNWRAP_OR_DEFAULT()"];
     let mut count = 0;
     for (p, c) in rs {
         if !on_eval_path(p) {
@@ -440,8 +451,30 @@ fn scan_error_swallow(rs: &[SrcFile]) -> usize {
         }
         let body = compact_ws(&strip_line_comments_rs(c).to_ascii_uppercase());
         for pat in BAD {
-            count += body.matches(&pat.to_ascii_uppercase()).count();
+            count += body.matches(pat).count();
         }
+        // Structural: `.unwrap_or_else(|<any binding>| true)` — covers |_|, ||,
+        // |_e|, |err| etc. (round-3 SCAN-2), not just the underscore form.
+        count += count_unwrap_or_else_true(&body);
+    }
+    count
+}
+
+/// Count `.UNWRAP_OR_ELSE(|<ident-or-empty>|TRUE...)` occurrences in an
+/// already whitespace-folded, uppercased body.
+fn count_unwrap_or_else_true(body: &str) -> usize {
+    const HEAD: &str = ".UNWRAP_OR_ELSE(|";
+    let mut count = 0;
+    let mut i = 0;
+    while let Some(p) = body[i..].find(HEAD) {
+        let after_first_pipe = i + p + HEAD.len();
+        if let Some(q) = body[after_first_pipe..].find('|') {
+            let rest = &body[after_first_pipe + q + 1..];
+            if rest.starts_with("TRUE") {
+                count += 1;
+            }
+        }
+        i = after_first_pipe;
     }
     count
 }
@@ -522,8 +555,8 @@ fn fix_raw_sql_manifest() -> Vec<SrcFile> {
     )])
 }
 fn fix_unbounded() -> Vec<SrcFile> {
-    // Plain unbounded + the two smuggle shapes round-2 found (COUNT subquery and
-    // WHERE id = ? attached to a UNION) — all must still be flagged (r2 F1).
+    // Plain unbounded + COUNT-subquery + UNION (r2 F1) + the set/join/OR
+    // re-widening shapes (r3 SCAN-1) — all must be flagged.
     fix(&[
         ("crates/postern-store/src/policy/u.rs",
             r#"q("SELECT id FROM temp_grants WHERE principal_id = ?1")"#),
@@ -531,6 +564,14 @@ fn fix_unbounded() -> Vec<SrcFile> {
             r#"q("SELECT id, (SELECT COUNT(*) FROM t2) FROM big_table")"#),
         ("crates/postern-store/src/policy/w.rs",
             r#"q("SELECT * FROM grants WHERE id = ? UNION SELECT * FROM more")"#),
+        ("crates/postern-store/src/policy/x1.rs",
+            r#"q("SELECT * FROM a WHERE id = ? INTERSECT SELECT * FROM huge")"#),
+        ("crates/postern-store/src/policy/x2.rs",
+            r#"q("SELECT * FROM a WHERE id = ? EXCEPT SELECT * FROM huge")"#),
+        ("crates/postern-store/src/policy/x3.rs",
+            r#"q("SELECT * FROM huge WHERE id = ? OR tenant = ?")"#),
+        ("crates/postern-store/src/policy/x4.rs",
+            r#"q("SELECT * FROM a, huge_table b WHERE id = ?")"#),
     ])
 }
 fn fix_id_dep() -> Vec<SrcFile> {
@@ -568,10 +609,12 @@ fn fix_forbidden_edge() -> Vec<SrcFile> {
     )])
 }
 fn fix_error_swallow() -> Vec<SrcFile> {
-    // unwrap_or(true) + unwrap_or_else(|_| true) variant (r2 F4).
+    // unwrap_or(true) + closure forms incl. named error bindings (r2 F4 / r3 SCAN-2).
     fix(&[
         ("crates/postern-core/src/eval/e.rs", "let ok = check(req).unwrap_or(true);"),
         ("crates/postern-core/src/eval/f.rs", "let ok = check(req).unwrap_or_else(|_| true);"),
+        ("crates/postern-core/src/eval/g.rs", "let ok = check(req).unwrap_or_else(|_e| true);"),
+        ("crates/postern-core/src/eval/h.rs", "let ok = check(req).unwrap_or_else(|err| true);"),
     ])
 }
 
