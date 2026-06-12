@@ -236,89 +236,61 @@ pub trait Adapter: Send + Sync {
 
 ## 8 · 验收标准
 
-> 本节是 `postern-adapters` 的**验收基准**：每条都给「输入 → 可观察结果」的判据与**验证方式**，让实现者据此自检、审查者据此判定"本模块是否完成"。按 A~F 六维度组织（与本模块相关者；不相关者注明"不适用"）。维度 A 逐条对应 §3 功能，B 对应 §5 接口，C 对应 §4 边界，D 对应 §7 不变量，E 对应 §6 交互，F 收口关键 fail-closed 路径。验证方式词汇统一（见 00 §8 规约）。**纯设计：以下只描述"验证什么、怎么验证"，不含测试实现代码。**
+> 本节是 `postern-adapters` 的**验收基准**：拿这份清单可逐条判定开发实现的"功能写全没、逻辑对不对"。每条 = **要求 + 通过判定**，通过判定对当前代码只有"通过/不通过"一个答案，无歧义、可复现；判定方式按条目而定（行为观察 / 接口存在 / Stele 契约绿红 / 结构检查），不强求都是单元测试。
+>
+> 说明：本 crate 的行为级通过判定挂到场景规格（`docs/examples/02/04/05/07`）与红队 `postern verify`（详细设计 6.7 九项）；§7 引用的 `UNCLASSIFIABLE_INTENT_DENIED`、`CONS-20` 是运行时行为契约，不在现行 24 条 Stele 静态契约内，其相关条目以行为观察判定并标注。
 
-### 8.A 功能完整性（对应 §3 每项功能）
+### 一、功能完整性（判断：该有的功能都写了吗、行为对吗）
 
-| # | 功能（§3） | 输入 → 可观察结果（判据） | 验证方式 |
-|---|---|---|---|
-| A1 | `classify` 纯只读归类（§3.1） | `SELECT id,status FROM public.orders WHERE status='paid'` → `Ok(ClassifiedIntent{ capability=Query, objects=["public.orders"] })`（无 `INTO`、无写节点） | `单元测试`；`场景规格 docs/examples/04 §4.1 Trace ① [2]` |
-| A2 | `classify` 按最高危写节点定档·CTE 不降级（§3.1） | `WITH x AS (DELETE FROM public.orders RETURNING *) SELECT * FROM x` → `Ok(capability=Destroy)`，**绝不**为 `Query`/`Mutate` | `集成测试（内存Fake）`（"伪装攻击语料"断言归档=Destroy）；`postern verify 项2`；`场景规格 docs/examples/04 §4.2 A`；`场景规格 docs/examples/07 §C`（红队九项·项1/2） |
-| A3 | `classify` `Insert/Update/Merge` → `Mutate`，`Show/EXPLAIN(非 ANALYZE)` → `Observe`（§3.1） | `INSERT INTO t ...`→`Mutate`；`EXPLAIN SELECT ...`→`Observe`；`EXPLAIN ANALYZE INSERT ...`→`Mutate`（按内部最高危写节点） | `单元测试`；`集成测试（内存Fake）`（语料逐形态断言档位） |
-| A4 | `classify` 不可靠归类一律 `Err`（§3.1） | 解析失败 / 多语句 / 未知节点 / `SET`/`DO`/`COPY`/`CALL` → `Err(ClassifyError)`（→ deny） | `单元测试`；`集成测试（内存Fake）`；`场景规格 docs/examples/04 §4.2 A`（归类不可达即 deny）；`场景规格 docs/examples/04 §4.1 Trace ①[2]`（归类失败即 deny、不进 [3]） |
-| A5 | `check_constraint` 各 `kind` 语义（§3.2） | `table_allow` 白名单外表 → `Ok(false)`；`http_route` 白名单外 `(method,path)` → `Ok(false)`；`container_prefix` 前缀不匹配 → `Ok(false)`；命中则 `Ok(true)` | `单元测试`（逐 `kind`）；`场景规格 docs/examples/04 §4.1 Trace ①[4]/②[4]/③[4]` |
-| A6 | `check_constraint` 同 `kind` 多行取交集、跨 `kind` 恒 `AND`（§3.2） | 同 `kind` 任一行不满足 → `Ok(false)`；不同 `kind` 任一不满足 → `Ok(false)`（fail-closed，默认不取并集） | `单元测试`（合并语义） |
-| A7 | `engine_enforced()` 如实声明（§3.3） | postgres → `true`；http / docker_logs → `false` | `单元测试`；`构造签名审查`（返回值与文档 §3.3 一致） |
-| A8 | `execute` 在 `Channel` 上执行放行意图、产出未脱敏 `RawResponse`（§3.4） | 给定已放行 `Intent` + `&mut Channel` → `Ok(RawResponse)`（原始未脱敏；脱敏归内核出口） | `集成测试（内存Fake）`（Fake `Channel`）；`场景规格 docs/examples/04 §4.1 Trace ①[8]/②[8]/③[8]` |
-| A9 | Intent 负载格式 / MCP 动词工具参数 schema 定义（§3.6） | 各协议 `Intent` 结构与 `postern_query`/`postern_mutate`/… 的 `request` 形态由本 crate 定义；外壳忠实装箱不解释 | `构造签名审查`（schema 属主在 adapters）；`单元测试`（负载序列化往返） |
-| A10 | `discover` 真实探测产出 `CapabilitySurface`（§3.5） | 给定 `&mut Channel` → `Ok(CapabilitySurface)`（资源能力事实，不含任何授权） | `集成测试（真实资源）`（接入侧探测）；`构造签名审查`（产物为事实型，无授权字段）；`场景规格 docs/examples/02 §4.1 步骤6`（控制面 discover 回报能力面事实） |
-| A11 | 伪装攻击识别统一收敛为正确归类或 `Err`（§2 职责7、收敛于 §3.1 `classify`） | 写 CTE / 子查询藏写 / 多语句 / 注释混淆 / `DO` 块 / `SET` 会话篡改 → 各自归正确高危档或 `Err`，无一降级放行 | `集成测试（内存Fake）`（"伪装攻击语料"全集）；`postern verify 项1`；`postern verify 项2`；`场景规格 docs/examples/07 §C`（红队九项含项1/2） |
+| 编号 | 要求（必须实现） | 通过判定（满足即过，否则不过） |
+|---|---|---|
+| F-1 `Adapter` 七方法实现 | postgres / docker_logs / http 三实现各提供 `protocol`/`capabilities`/`engine_enforced`/`classify`/`check_constraint`/`execute`/`discover`，签名与 §5 core 定义一致 | 三实现全部存在且能编译；每个 `Adapter` impl 七方法俱全、签名逐一对齐 core trait（缺一方法或签名不符则编译失败） |
+| F-2 classify·纯只读归 Query（§3.1） | SQL 无写节点、无 `INTO` 归 `Query` | `classify("SELECT id,status FROM public.orders WHERE status='paid'")` → `Ok(ClassifiedIntent{ capability=Query, objects=["public.orders"] })`（场景 04 §4.1 Trace ①[2]） |
+| F-3 classify·Insert/Update/Merge 归 Mutate（§3.1） | 写但非删除/删表/清表 → `Mutate` | `classify("INSERT INTO public.t VALUES(...)")` → `Ok(capability=Mutate)`；`UPDATE`/`MERGE` 同档 |
+| F-4 classify·Delete/Drop/Truncate 归 Destroy（§3.1） | 最高危写为删除/删表/清表 → `Destroy` | `classify("DELETE FROM public.orders WHERE id=1")` → `Ok(capability=Destroy)`（顶层即 Destroy，不降为 Mutate） |
+| F-5 classify·Show/EXPLAIN(非 ANALYZE) 归 Observe（§3.1） | 只读元信息观测 → `Observe` | `classify("EXPLAIN SELECT * FROM public.orders")` → `Ok(capability=Observe)`；`SHOW search_path` → `Observe` |
+| F-6 classify·docker_logs 恒 Observe（§3.1） | 容器日志请求恒只读 | docker_logs `classify(取容器日志 Intent)` → `Ok(capability=Observe, objects=["container:<名>"])`（场景 04 §4.1 Trace ③[2]） |
+| F-7 classify·http 按动词工具/路径归类（§3.1） | HTTP 请求按声明动词工具+路径归相应 `Capability` | http `classify({method:"POST", path:"/api/orders"})` → `Ok(capability=Mutate, objects=[route:/api/orders])`（场景 04 §4.1 Trace ②[2]） |
+| F-8 check_constraint 各 `kind` 语义（§3.2） | 本 crate 是各 `kind`（`table_allow`/`column_mask`/`container_prefix`/`http_route`/`command_template`/`script_template`/`path_whitelist`/`key_prefix`/`command_class`/`vhost_allow`/`queue_prefix`/`route_allow`/`mask_fields`）语义属主，对一个已物化 `ci` 按 `spec` 判通过/不通过 | `table_allow` 命中白名单内表 → `Ok(true)`、白名单外表 → `Ok(false)`；`http_route` 命中白名单 `(method,path)` → `Ok(true)`、白名单外 → `Ok(false)`；`container_prefix` 前缀匹配 → `Ok(true)`、不匹配 → `Ok(false)`（场景 04 §4.1 Trace ①/②/③ 步骤[4]） |
+| F-9 execute 执行放行意图产出未脱敏响应（§3.4） | 在 `Channel` 上执行**已放行** `Intent`，产出**未脱敏** `RawResponse` | 给定已放行 `Intent` + `&mut Channel`（内存 Fake）→ `Ok(RawResponse)`，其内容为原始未脱敏字节（脱敏归内核出口，本方法不擦字节；场景 04 §4.1 Trace ①/②/③ 步骤[8]） |
+| F-10 engine_enforced 如实声明（§3.3） | 经返回值如实申明是否有引擎级强制兜底 | postgres `engine_enforced()==true`；http `engine_enforced()==false`；docker_logs `engine_enforced()==false` |
+| F-11 discover 真实探测产出能力面（§3.5） | 真实连上资源探测，产出 `CapabilitySurface`（纯事实） | 给定 `&mut Channel` → `Ok(CapabilitySurface)`，其字段全为"资源具备何种能力"的事实、无任何授权字段（场景 02 §4.1 步骤6） |
+| F-12 Intent 负载格式 / MCP 动词工具 schema 定义（§3.6） | 本 crate 定义各协议 `Intent` 结构与 `postern_query`/`postern_observe`/`postern_mutate`/`postern_execute`/`postern_manage`/`postern_destroy` 的 `request` schema | 这些 `Intent`/`request` 类型定义在本 crate（非 core、非外壳）；同一负载序列化→反序列化往返后逐字段相等 |
 
-### 8.B 对外接口契约（对应 §5 `Adapter` trait）
+### 二、逻辑正确性（判断：关键逻辑、边界、失败处理对不对）
 
-| # | 接口（§5） | 判据（签名稳定 + 语义符合承诺 + 错误路径正确） | 验证方式 |
-|---|---|---|---|
-| B1 | `Adapter` trait 实现完整 | postgres / docker_logs / http 三实现均提供 `protocol`/`capabilities`/`engine_enforced`/`classify`/`check_constraint`/`execute`/`discover`，签名与 core 定义一致 | `构造签名审查`（trait 实现对齐 core 定义）；`单元测试` |
-| B2 | `classify` 错误路径 | 失败唯一表达为 `Err(ClassifyError)`，**绝不**以 `Ok` 静默降档放行 | `单元测试`；`clippy（deny warnings）`（无 `#[allow]` 旁路）；与 §7「无法可靠归类→Err」同源 |
-| B3 | `check_constraint` 错误路径 | 不通过返回 `Ok(false)`，无法判定返回 `Err(ConstraintError)`；二者皆经内核翻译为 deny | `单元测试` |
-| B4 | `execute` / `discover` async 错误路径 | 失败为 `Err(ExecError)` / `Err(DiscoverError)`；不 panic、不吞错 | `集成测试（内存Fake）`（Fake `Channel` 注入断链/超时） |
-| B5 | 错误枚举到"拒绝阶段"映射穷尽 | 本 crate 一个 `thiserror` 枚举；新增变体未在 `core::error` 写映射则**无法编译**（§5、详设 7.1） | `构造签名审查`（穷尽 `match`，编译期保证）；`单元测试` |
-| B6 | 只消费 core 类型、不重定义 | `Intent`/`ClassifiedIntent`/`Capability`/`ObjectRef`/`ConstraintSpec`/`Channel`/`RawResponse`/`CapabilitySurface` 均来自 core | `构造签名审查`；`cargo tree`（依赖仅含 `postern-core`） |
+| 编号 | 要求（行为必须正确） | 通过判定 |
+|---|---|---|
+| L-1 CTE/子查询里写节点不降级（§3.1，核心） | 危险动词在整棵语句树可见，CTE/子查询里的 DELETE/DROP/TRUNCATE 一律提升为 `Destroy`，绝不因只读外壳包裹而降级 | `classify("WITH x AS (DELETE FROM public.orders RETURNING *) SELECT * FROM x")` → `Ok(capability=Destroy)`，**绝不**为 `Query`/`Mutate`（场景 04 §4.2 A；场景 07 §C 项2；`postern verify 项2`） |
+| L-2 子查询藏写归 Destroy（§3.1） | 子查询内 DELETE/DROP/TRUNCATE 同样按最高危写定档 | 子查询藏 `DELETE` 的语句 → `Ok(capability=Destroy)`，不降级 |
+| L-3 `SET` 一律拒绝（§3.1） | `SET` 改会话语义、不属只读观测，无白名单逃生口 | `classify("SET search_path = ...")` → `Err(ClassifyError)`；任意 `SET ...` 形态均 `Err`（无任何放行分支） |
+| L-4 EXPLAIN ANALYZE 按内部最高危写定档（§3.1） | `EXPLAIN ANALYZE` 真实执行被解释语句，按其内部最高危写节点定档 | `classify("EXPLAIN ANALYZE DELETE FROM public.orders")` → `Ok(capability=Destroy)`（非 Observe）；`EXPLAIN ANALYZE INSERT ...` → `Mutate` |
+| L-5 无法可靠归类 → `Err` → deny（fail-closed，§3.1） | 解析失败/多语句/未知节点/`DO`/`COPY`/`CALL` 一律 `Err` | 上述每种输入 `classify(...)` → `Err(ClassifyError)`（白名单外宁可误拒）；内核据此 deny、不进 [3]（场景 04 §4.1 Trace ①[2]、§4.2 A；运行时契约 `UNCLASSIFIABLE_INTENT_DENIED`，行为观察判定） |
+| L-6 伪装攻击全集收敛为正确归类或 `Err`（§2 职责7，收敛于 §3.1） | 写 CTE / 子查询藏写 / 多语句 / 注释混淆 / `DO` 块 / `SET` 篡改 → 各自归正确高危档或 `Err`，无一降级放行 | 对"伪装攻击语料"全集逐条断言：每条要么归其真实最高危档、要么 `Err`，**无一条降级为低危档放行**（场景 07 §C 项1/2；`postern verify 项1`、`postern verify 项2`） |
+| L-7 check_constraint false/Err → deny（§3.2） | 不通过返回 `Ok(false)`，无法判定返回 `Err(ConstraintError)`，二者皆经内核翻译为拒绝 | 白名单外输入 → `Ok(false)`；判定所需信息缺失/异常 → `Err(ConstraintError)`；两者均不返回 `Ok(true)`（场景 04 §4.1 Trace ③[4]） |
+| L-8 细则合并·同 kind 取交集、跨 kind 恒 AND（§3.2） | 默认 fail-closed，不取并集（除非 `spec` 显式声明扩权） | 同 `kind` 多行任一行不满足 → `Ok(false)`；不同 `kind` 任一不满足 → `Ok(false)` |
+| L-9 engine_enforced 返回值与防线标注一致（§3.3） | postgres 有引擎账号兜底、http/docker_logs 无；后者归类+细则是唯一防线，须经返回值与文档如实标注 | `postgres.engine_enforced()==true`；`http.engine_enforced()==false`、`docker_logs.engine_enforced()==false`；且 http/docker_logs 模块文档含"归类+细则是唯一防线"标注串（返回值为单元判定，标注为结构检查；本条不依赖 `postern verify`——verify 项1 是内核+引擎层红队结果，挂于 DoD） |
+| L-10 execute 只执行已放行意图（§3.4） | `execute` 是步骤[8]，仅在 [1]~[6] 放行、[7a] 审计、[7b] 取连接均成立后被调用 | 内核管线在 deny 短路时**不到达** `execute`（如场景 05 §4.1 步骤1 越权 `manage` 在 [3] RBAC 短路，`execute` 不被调用、零副作用、确未重启容器）；以"deny 路径下 `Adapter::execute` 调用计数==0"判定，行为观察 |
+| L-11 已执行请求绝不返回 deny（§3.4） | 有副作用动词一旦底层已落库副作用，错误经内核出口脱敏返回，绝不再返回 deny | 注入"执行已落副作用后出错"的路径 → 返回脱敏后的 `ExecError`，**非 deny**（场景 04 §4.1 Trace ②[8]/[10]；时序不变量由内核守护，本 crate 经 `Err` 协同，行为观察判定） |
+| L-12 discover 仅控制面触发·发现≠授权（§3.5） | `discover` 只由控制面触发、只产事实、不产授权；数据面无触发路径 | 数据面 `postern_surface` 是授权快照投影、**不调用** `Adapter::discover`、不触底层资源；`discover` 产物 `CapabilitySurface` 无授权字段（场景 02 §4.1 步骤6；CONS-20 命名边界，行为观察/结构检查判定） |
+| L-13 只见 Channel，拿不到地址/凭据/tier（§4） | 适配器只见 `&mut Channel` 抽象，不知传输种类/真实地址/凭据/tier | `execute`/`discover` 签名入参仅 `&mut Channel` + `&Intent`（无 `CredentialTier`/`ResolvedTarget`/`ResourceCredential`/地址类型形参——签名结构检查，缺即不符 §5 承诺）；执行中断 → 适配器经 `Channel` 收错并以 `ExecError` 上报，本 crate 源码内无真实地址/凭据字面量来源（与 B-1 禁止边、B-3 不构造机密协同；场景 04 §4.2 G 拿不到 app 账号、§4.2 C 脱敏出口） |
+| L-14 适配器绝不吞错放行（§7，fail-closed） | 任一失败唯一表达为 `Err`，无静默 `Ok`/降级放行路径 | `classify`/`check_constraint`/`execute`/`discover` 的失败均为 `Err(...)`；无 `.ok()`/`.unwrap_or(true)`/`.unwrap_or_default()` 等吞错放行写法（与内核 `EVAL_NO_ERROR_SWALLOWING` 协同；本 crate 经 B-6 clippy 退出码 0 兜底） |
+| L-15 错误枚举→拒绝阶段映射穷尽（§5） | 本 crate 一个 `thiserror` 枚举，其变体到拒绝 `stage` 映射在 `core::error` 穷尽 | 新增错误变体未在 `core::error` 写映射则**无法编译**（穷尽 `match`、无 `_ =>` 通配兜底，编译期保证） |
+| L-16 适配器只产归类、不产决策（§4 边界） | 适配器既不产 `Decision`（allow/deny/escalate）也不选 `CredentialTier`；授权判定归 `core::eval` | `classify` 返回 `ClassifiedIntent`、`check_constraint` 返回 `bool`、二者签名返回类型均**不含** `Decision`/`CredentialTier`；本 crate 源码无 `Decision::Allow`/`Decision::Deny`/`Decision::Escalate` 构造点、无 `CredentialTier` 选择逻辑（签名 + 结构检查，缺即不符 §4/§5） |
 
-### 8.C 边界·禁止项（对应 §4 每条"不做什么"；机器可验者优先标注）
+### 三、边界与不变量（机器强制，绿/红即答案）
 
-| # | 不做的事（§4） | 判据（确实无此代码路径） | 验证方式 |
-|---|---|---|---|
-| C1 | 不做授权判定（allow/deny/escalate） | 本 crate 无 `Decision`/`Allow`/`Escalate` 产出路径；只产 `ClassifiedIntent`/`bool`/`RawResponse` | `构造签名审查`（无返回 `Decision` 的对外路径） |
-| C2 | 不选 `CredentialTier`、不感知 tier | 全 crate 无 `CredentialTier` 入参/出参/分支 | `构造签名审查`（接口签名不含 tier） |
-| C3 | 不获取/池化/重建/回收通路 | 无 `acquire`/连接池/退避/健康检查代码；只接收 `&mut Channel` | `构造签名审查`；`cargo tree`（无 connpool 依赖） |
-| C4 | 不感知传输种类、不建/关通路 | 无 ssh/ssm/direct 分支，不依赖 `postern-transports` | **`Stele契约 ARCH_FORBIDDEN_EDGES`**（禁 `adapters→transports`）；`cargo deny`/`cargo tree` |
-| C5 | 不取资源凭据与真实地址 | 无 `vault://` 解析、无 `(res,tier)→凭据` 路径、不依赖 `postern-secrets` | **`Stele契约 ARCH_FORBIDDEN_EDGES`**（禁 `adapters→secrets`）；与 §7「只见 Channel」同源；`场景规格 docs/examples/04 §4.2 G`（拿不到 app 账号） |
-| C6 | 不执行响应脱敏（含 `mask_fields` 擦除、拒绝/错误脱敏） | `execute` 产出**未脱敏** `RawResponse`；`mask_fields` 仅定义声明形态，不持 `ScrubSet`、不擦字节 | `构造签名审查`（无 `Sanitizer`/`ScrubSet` 持有或调用）；`场景规格 docs/examples/04 §4.1 Trace ③[9]`（脱敏在 [9] 出口而非适配器） |
-| C7 | 不构造 `ScrubSet` | 无 `ScrubSet` 构造点（属机密面 8.8） | **`Stele契约 ARCH_FORBIDDEN_EDGES`**（不依赖 secrets）；`构造签名审查` |
-| C8 | 不读写策略、不构建快照 | 无 `PolicyRepo`/`PolicySnapshot` 路径，不依赖 `postern-store`；`spec` 由内核传入 | **`Stele契约 ARCH_FORBIDDEN_EDGES`**（禁 `adapters→store`）；`cargo tree` |
-| C9 | `discover` 不产生授权、不决定何时触发 | `discover` 产物为纯事实 `CapabilitySurface`（无授权字段）；触发权在控制面 | `构造签名审查`；`场景规格 docs/examples/02 §4.1 步骤6`（接入探测经控制面、发现≠授权）；与 §7「发现≠授权」同源 |
-| C10 | 不落审计、不采集来源、不构造 `ConnOrigin` | 无 `AuditSink` 调用；无 `ConnOrigin` 构造（属外壳 listener） | **`Stele契约 SEC_CONSTRUCTION_SITES`**（`ConnOrigin` 仅 daemon shells 构造）；`构造签名审查` |
-| C11 | 不构造机密类型 | 无 `ResolvedTarget`/`ResourceCredential` 构造点（构造权仅 `postern-secrets`） | **`Stele契约 SEC_CONSTRUCTION_SITES`**；**`Stele契约 SEC_SECRET_TYPE_DISCIPLINE`**（机密类型禁 Clone/Serialize，本 crate 无从复制传递） |
+| 编号 | 要求 | 通过判定（机器） |
+|---|---|---|
+| B-1 无 adapters↛secrets/transports/store 禁止边（§4/§6/§7） | 依赖图无任一禁止边；只见 Channel、不可达地址凭据是编译期事实 | 契约 `ARCH_FORBIDDEN_EDGES`（+ `_TEETH`）绿；`cargo tree -p postern-adapters -e normal` 不含 `postern-secrets`/`postern-transports`/`postern-store` |
+| B-2 唯一依赖边 adapters→core（§6） | 本 crate 仅依赖 `postern-core` | `cargo tree -p postern-adapters` 工作区内依赖仅 `postern-core`；`cargo deny check bans` 退出码 0 |
+| B-3 不构造机密类型（§4/§7） | 本 crate 内无 `ResolvedTarget`/`ResourceCredential` 构造点 | 契约 `SEC_CONSTRUCTION_SITES`（+ `_TEETH`）绿 |
+| B-4 机密类型不可复制/序列化（§4/§7） | `ResolvedTarget`/`ResourceCredential` 不可 Clone/Serialize，本 crate 无从复制传递 | 契约 `SEC_SECRET_TYPE_DISCIPLINE`（+ `_TEETH`）绿 |
+| B-5 不构造 `ConnOrigin`（§4） | `ConnOrigin` 仅 daemon shells(listener) 构造，本 crate 无构造点 | 契约 `SEC_CONSTRUCTION_SITES`（+ `_TEETH`）绿（其规则含 `ConnOrigin` 构造点约束） |
+| B-6 lint 红线 | 无 unwrap/expect/panic/吞错放行 | `cargo clippy -p postern-adapters --all-features -- -D warnings` 退出码 0 |
 
-### 8.D 必守不变量（对应 §7 每条；沿用 §7 已标强制手段）
+### 通过定义（DoD）
 
-| # | 不变量（§7） | 验证（判据 + 强制手段） | 验证方式 |
-|---|---|---|---|
-| D1 | 无法可靠归类 → `Err` → deny（白名单归类，宁可误拒） | 未知/歧义/多语句 `Intent` → `Err`；内核据此 deny（运行时契约 `UNCLASSIFIABLE_INTENT_DENIED`） | `单元测试`；`集成测试（内存Fake）`；`场景规格 docs/examples/04 §4.1 Trace ①[2]` |
-| D2 | SQL 按最高危写节点定档，CTE/子查询里 DELETE/DROP/TRUNCATE → Destroy，绝不降级 | 伪装写语料逐条断言归 Destroy，无降级 | `集成测试（内存Fake）`（伪装攻击语料，详设 7.3）；`postern verify 项1`；`postern verify 项2` |
-| D3 | `SET` 一律拒绝、不设白名单逃生口 | 任意 `SET ...` → `Err`（无白名单分支） | `单元测试`；`集成测试（内存Fake）`（语料断言 deny） |
-| D4 | `EXPLAIN` 仅非 `ANALYZE` 归 Observe；`EXPLAIN ANALYZE` 按内部最高危写定档 | `EXPLAIN SELECT`→Observe；`EXPLAIN ANALYZE DELETE ...`→Destroy | `单元测试` |
-| D5 | 只见 `Channel`，不可达真实地址与凭据 | 无 `vault://` 解析、无 transport import；依赖图仅 `adapters→core` | **`Stele契约 ARCH_FORBIDDEN_EDGES`**（build.rs `FORBIDDEN_EDGES` + 反例自检 `ARCH_FORBIDDEN_EDGES_TEETH`）；`cargo tree`/`cargo deny` |
-| D6 | 不构造机密类型（`ResolvedTarget`/`ResourceCredential`） | 非 secrets 路径构造计违规 | **`Stele契约 SEC_CONSTRUCTION_SITES`**（`scan_construction_sites` + 反例自检 `SEC_CONSTRUCTION_SITES_TEETH`）；**`Stele契约 SEC_SECRET_TYPE_DISCIPLINE`** |
-| D7 | `discover` 只产出事实、不产生授权（发现≠授权） | `discover` 仅控制面触发、产物无授权语义；与数据面 `postern_surface` 命名边界（CONS-20）不互借 | `构造签名审查`（产物为事实型）；`场景规格 docs/examples/02 §4.1 步骤6`；运行时行为契约 CONS-20（命名边界，非 24 条静态契约） |
-| D8 | `execute` 只执行已被求值放行的意图 | 内核管线短路保证：步骤[1]~[6] 放行后才到 [8]；有副作用动词两阶段审计时序由内核守护（6.1） | `集成测试（内存Fake）`（管线放行后才达 execute）；`场景规格 docs/examples/05 §4.1 步骤6`（manage 两阶段审计） |
-| D9 | `engine_enforced=false` 协议须如实标注"归类+细则是唯一防线" | http/docker_logs `engine_enforced()=false` 且文档标注；SQL 类 `true` | `单元测试`；`构造签名审查`；`postern verify 项1`（SQL 类引擎兜底为真则 PASS） |
-| D10 | 仅依赖 `core`，不依赖工作区任何 IO crate | 依赖图无 `adapters→secrets/transports/store` | **`Stele契约 ARCH_FORBIDDEN_EDGES`**；`cargo deny`/`cargo tree` |
-| D11 | 求值相关路径不吞错放行 | 适配器以 `Err` 表达失败；无 `.ok()`/`.unwrap_or(true)`/`.unwrap_or_default()` 旁路放行（与内核 `EVAL_NO_ERROR_SWALLOWING` 协同） | `clippy（deny warnings）`；`构造签名审查`（失败唯一表达为 `Err`）；契约作用面注：`EVAL_NO_ERROR_SWALLOWING` 主守 `core::eval`/`daemon::kernel`，适配器经返回 `Err` 协同 |
+`postern-adapters` **算完成** ⟺ 一、二、三三组**每一条都通过**。任一条不过 = 不通过，必须修。F 类靠"七方法存在且签名对齐 + 给定输入看归类/细则/执行是否符合通过判定"；L 类靠"触发某条件→行为恰为某可观察结果"（含核心 fail-closed：CTE 写不降级 L-1/L-6、归类失败即拒 L-5、`SET` 即拒 L-3、细则 false/Err 即拒 L-7、已执行不返 deny L-11、discover 发现≠授权 L-12、不吞错放行 L-14；只产归类不产决策 L-16）；B 类靠"跑契约/cargo tree|deny/clippy 看绿红"。
 
-### 8.E 与相邻模块交互（对应 §6 每条交互边：方向/类型/时机/失败语义可验）
-
-| # | 交互边（§6） | 判据（方向·类型·时机·fail-closed） | 验证方式 |
-|---|---|---|---|
-| E1 | ← `daemon::kernel`：`classify`（步骤[2]）（§6.1） | kernel 传 `&Intent` → 收 `ClassifiedIntent`；`classify` 返回 `Err` → kernel deny（不进 [3]） | `集成测试（内存Fake）`（Fake kernel 驱动）；`场景规格 docs/examples/04 §4.1 Trace ①[2]` |
-| E2 | ← `daemon::kernel`：`check_constraint`（步骤[4]，先行物化为 `ConstraintCheck` 入参，CONS-8）（§6.1） | kernel 传 `(spec, ci)` → 收 `bool`；`false`/`Err` → kernel deny；`spec` 由内核自快照传入，适配器不读策略库 | `集成测试（内存Fake）`；`构造签名审查`（`check_constraint` 不持策略库句柄）；`场景规格 docs/examples/04 §4.1 Trace ②[4]` |
-| E3 | ← `daemon::kernel`：`execute`（步骤[8]，放行+[7a]审计+[7b]取连接后）（§6.1） | kernel 传 `(&mut Channel, &Intent)` → 收未脱敏 `RawResponse`；有副作用动词一旦已执行**绝不再返回 deny**（错误经内核出口脱敏） | `集成测试（内存Fake）`；`场景规格 docs/examples/04 §4.1 Trace ②[8]/[10]`（已执行不返回 deny） |
-| E4 | ← `daemon::control`：`discover`（接入/发现触发）（§6.2） | 经 `POST /v1/resources/{code}/discover` 进入；control 传 `&mut Channel` → 收 `CapabilitySurface`；`Err` → control 拒绝接入，绝不据失败生成授权；数据面无触发路径 | `集成测试（真实资源）`；`场景规格 docs/examples/02 §4.1 步骤6`；与 §7「仅控制面触发」同源 |
-| E5 | → 经 `connpool` 提供的 `Channel`（只见 Channel）（§6.3） | `execute`/`discover` 仅消费 `&mut Channel`；不知 transport 种类/真实地址/凭据/tier；通路在调用**前**不可建则内核已 deny（步骤[7b]），适配器拿不到坏通路；执行中断链 → `ExecError` 上报，由内核脱敏 | `构造签名审查`（仅 `&mut Channel` 入参）；`集成测试（内存Fake）`（断链注入）；`场景规格 docs/examples/04 §4.2 D`（不可建→deny） |
-| E6 | → `postern-core`：消费领域类型与 trait 定义（§6.4） | 编译期实现 trait + 运行时类型流转；core 零 IO 无运行期失败面引入；本 crate 不构造 core 机密占位类型 | `cargo tree`（唯一依赖边 `adapters→core`）；`构造签名审查`；**`Stele契约 SEC_CONSTRUCTION_SITES`** |
-
-### 8.F 失败与边界行为（关键 fail-closed 路径逐条可验）
-
-| # | fail-closed 路径 | 输入 → 可观察结果 | 验证方式 |
-|---|---|---|---|
-| F1 | 归类失败 → 拒绝 | 不可靠/歧义/多语句 `Intent` → `classify` 返回 `Err` → 内核 deny（确未执行） | `单元测试`；`集成测试（内存Fake）`；`场景规格 docs/examples/04 §4.2 A` |
-| F2 | 伪装写不降级 → 拒绝（引擎兜底为最后防线） | ① 写 CTE 经**只读**授权 → 归类拦截或经只读账号被引擎拒（对应 verify 项1）；② `WITH x AS (DELETE ...) SELECT ...` 经 **mutate** 授权 → 按最高危写节点归 `Destroy`、mutate 授权不足以放行（对应 verify 项2）；两者均零行副作用 | `postern verify 项1`；`postern verify 项2`；`场景规格 docs/examples/04 §4.2 A` |
-| F3 | 细则不通过 → 拒绝 | `table_allow`/`http_route`/`container_prefix` 不匹配 → `Ok(false)` 或 `Err` → 内核 deny | `单元测试`；`场景规格 docs/examples/04 §4.1 Trace ③[4]` |
-| F4 | 通路不可建 → 拒绝（适配器视野外短路） | 通路建立失败 → 内核在 `execute` 调用前 deny（步骤[7b]）；适配器不被调用 | `集成测试（内存Fake）`；`场景规格 docs/examples/04 §4.2 D` |
-| F5 | 执行中断链 → 经内核脱敏返回，不外泄真实地址 | `Channel` 执行中断 → `ExecError` 上报；`connection refused to 10.0.3.17` 类原始串不外泄 | `集成测试（内存Fake）`（断链注入）；`场景规格 docs/examples/04 §4.2 C`（脱敏出口） |
-| F6 | 适配器绝不吞错放行 | 任一失败唯一表达为 `Err`，无静默 `Ok`/降级放行路径 | `clippy（deny warnings）`；`构造签名审查`；与 §7「不吞错」、契约 `EVAL_NO_ERROR_SWALLOWING`（内核侧）协同 |
-
-### 完成定义（Definition of Done）
-
-**当且仅当上述 A~F 全部判据成立——三个内置 `Adapter` 实现的归类按最高危写节点定档且伪装写无一降级（A2/A11/F2，`postern verify 项1/项2` PASS）、各细则 `kind` 语义与 `engine_enforced` 如实（A5/A7）、依赖图无任一禁止边（C4/C5/C7/C8/D10，`ARCH_FORBIDDEN_EDGES` 绿）、不构造任何机密类型与 `ConnOrigin`（C10/C11/D6，`SEC_CONSTRUCTION_SITES`/`SEC_SECRET_TYPE_DISCIPLINE` 绿）、所有失败沿 `Err` fail-closed 翻译为拒绝（B2/F1/F6）——`postern-adapters` 视为完成。**
+另设**集成级红队门**（非本 crate 单元判定，须在 daemon 组装后整链跑过，达成才算整体收尾）：`postern verify 项1`（伪装写经只读账号被引擎/归类拒，整体 deny）、`postern verify 项2`（CTE DELETE 经 mutate 授权按最高危写归 Destroy 被拒，整体 deny）须 PASS——二者依赖内核管线 + 引擎账号，本 crate 经 L-1/L-6 正确归类与 L-9 如实标注 `engine_enforced` 为其供给必要前提。

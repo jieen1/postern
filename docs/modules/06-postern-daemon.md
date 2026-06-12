@@ -264,118 +264,60 @@ acquire(resource: &ResourceCode, tier: &CredentialTier) -> Result<Channel /* 或
 
 ## 8. 验收标准
 
-> 本节是 `postern-daemon` 的**验收基准**——每条给「输入→可观察的预期结果」判据与**验证方式**，让实现者据此自检、审查者据此判定该模块是否完成。按 A~F 六维度组织（与本模块相关者）；A 逐条对应 §3 功能、C 逐条对应 §4 边界、D 逐条对应 §7 不变量、E 逐条对应 §6 交互。本 crate 是二进制组装点且是 `postern verify` 红队项与全部场景 02~07 的**运行载体**，故许多条目同时挂场景规格与 verify 项。
+> 本节是 `postern-daemon` 的**验收基准**：拿这份清单可逐条判定开发实现的"功能写全没、逻辑对不对"。每条 = **要求 + 通过判定**，通过判定对当前代码只有"通过/不通过"一个答案，无歧义、可复现；判定方式按条目而定（行为观察 / 接口存在 / Stele 契约绿红 / 构造签名审查 / `postern verify` 项），不强求都是单元测试。
 >
-> **验证方式用词约定**：`Stele契约 <名>` 一律指 `contract/proposals/agent-additions.stele` 里**静态扫描**的契约（`ARCH_*`/`SEC_*`/`DB_*`/`EVAL_*`，由 `stele check` 在编译期/依赖图/源文本上判定）；运行时语义（审计时序、TTL 求值生效、escalate 折叠、归类拒绝、拒绝响应 Scope 有界等）由**行为契约 `<名>`** 守住——其名见详细设计文档与场景规格（如 `AUDIT_FAILURE_DENIES`/`TEMP_GRANT_EXPIRY_EFFECTIVE`/`ESCALATE_FOLDS_TO_DENY`/`UNCLASSIFIABLE_INTENT_DENIED`/`DENY_RESPONSE_SCOPE_BOUNDED`，与 §7 标注一致），落地为 `cargo test` 内的 `test_contract` 行为用例，**不在 agent-additions.stele 静态契约集内**，故本节不以 `Stele契约` 标之。
+> 说明：本 crate 多条运行时安全语义（两阶段审计时序、TTL 求值时刻失效、escalate 折叠、归类拒绝、拒绝响应 Scope 有界、不做动词→tier 选择）在现行 24 条 Stele 契约（`contract/proposals/agent-additions.stele`：`DB_*`/`SEC_*`/`ARCH_*`/`EVAL_*` 各含 `_TEETH` 反例自检，全 24 条逐字列于第三组）中**无对应静态规则**——它们靠纯内存 `Evaluator` 驱动的行为用例（`cargo test` 内）与 `postern verify` 九项守住，故下文以**【行为观察】**标注、给出确切二元判定，不冒充 Stele 契约绿（§6/§7 提及的 `AUDIT_FAILURE_DENIES`/`TEMP_GRANT_EXPIRY_EFFECTIVE`/`ESCALATE_FOLDS_TO_DENY`/`DENY_RESPONSE_SCOPE_BOUNDED`/`NO_TIER_MATCH_DENIED` 是运行时行为契约语义，不在这 24 条静态规则内，故不写"绿"）。凡标**【人工】**者，是"crate 内职责越界 / 注入集合或类型签名细粒度"类命题——`stele check` 只覆盖跨 crate 依赖边与构造点，判不了 crate 内调用集与注入集合，须由构造函数签名 / 调用集审查逐项 yes/no（全 yes 才过）。`postern verify` 九项见详细设计 6.7，本 crate 是其运行载体。
 
-### A. 功能完整性（对应 §3 各内部模块功能）
+### 一、功能完整性（判断：该有的功能都写了吗、行为对吗）
 
-| # | 功能（§3） | 输入 → 可观察预期结果 | 验证方式 |
-|---|---|---|---|
-| A-1 | boot 启动序列（§3.1·1-5） | 启动 `posternd`：按「开库→校验 `user_version`/迁移版本/`settings` 表→重建首份 `Arc<PolicySnapshot>`→解锁 `vault.postern`（写 `lifecycle` 审计）→注册插件→先建 `control.sock(0600)` 后建 `data.sock` 并挂数据面 router」固定时序拉起；任一前置不成立 → 进程拒绝启动（非零退出）、数据面 socket 未开放 | 集成测试（真实资源：临时 `policy.db`+`vault.postern`）；场景规格 `docs/examples/02 §4.2 E9`（启动序列恢复） |
-| A-2 | `data.sock` 可连 uid 自检（§3.1·6，硬前置条件②） | 构造 `data.sock` 可连 uid 集合**含 daemon 自身 uid** 的环境 → fail-closed 拒绝启动（或明知风险形态下强制告警）；可连 uid 不含自身 uid → 正常开放 | `postern verify`（`data.sock` 可连 uid 不含 daemon 自身 uid 项，详细设计 5.5）；集成测试（真实资源：socket 权限/可连 uid 自检）；场景规格 `docs/examples/02 §4.1`（接入后 verify 含同 uid 校验项） |
-| A-3 | kernel 管线 [0]→[10] 编排（§3.2） | 外壳提交 `NormalizedRequest` → 内核按 [0]→[10] 逐步短路：[4] `check_constraint` 先于 `evaluate`、[6] 动作分流、出口脱敏；query/mutate/observe 三类入口骨架一致（公理七） | 集成测试（内存 Fake：Evaluator/Adapter/connpool/Sanitizer/AuditSink）；场景规格 `docs/examples/04 §4.1 Trace ①②③` |
-| A-4 | 两阶段审计时序（§3.2） | 只读动词执行后单次审计，写失败按 deny；有副作用动词 [7a] intent 写不进→执行前 deny（确未执行），[10] outcome 写失败→返回"已执行但审计降级"错误码、**绝不返回 deny** | `行为契约 AUDIT_FAILURE_DENIES`（纯内存 Evaluator 驱动的 `test_contract` 用例）；场景规格 `docs/examples/07 §4.2 E1/E2`、`docs/examples/04 §4.1 Trace ②[7a][10]` |
-| A-5 | 出口统一脱敏唯一调用点（§3.2） | 正常响应/错误/拒绝响应/外壳层 4xx/框架错误/panic 响应体——一切离开内核的字节经 `sanitize/` 同一 Sanitizer；数据面 router 挂 CatchPanic，panic→脱敏 deny + `kind=anomaly` 审计 | 集成测试（内存 Fake：注入 panic/错误路径）；场景规格 `docs/examples/04 §4.2 C`、`docs/examples/07 §4.2 E4` |
-| A-6 | shells/http + shells/mcp 外壳（§3.3） | HTTP 与 MCP 两形态请求 [0] 归一化为同一 `NormalizedRequest` 后鉴权/匿名化/脱敏/审计结果完全一致；MCP 工具集为固定动词工具 `postern_query/observe/mutate/execute/manage/destroy/grants/surface`，描述只含事实、不随授权增删 | 集成测试（内存 Fake）；场景规格 `docs/examples/04 §3 数据面`（入口对称）、`docs/examples/05 §2.1` |
-| A-7 | `postern_surface`（§3.3·CONS-20） | 调 `postern_surface()` → 返回该 Principal Scope 内已授权能力面（授权快照投影）；**不触达 `Adapter::discover`**、不触底层资源 | 构造签名审查（surface 路径无 `Adapter::discover` 调用）；场景规格 `docs/examples/04 §4.2 G`、`docs/examples/06 §3.3` |
-| A-8 | control 控制面端点全集 + 审批挂起（§3.4） | 启动后经 `control.sock` 可达 §6.5 端点全集（principals/credentials/roles/bindings/resources(含 `discover`)/constraints/conditions/deny-notes/settings/grants·temp/mode/audit/denials·summary/**approvals**/export/import/verify/health/shutdown）；每写端点=一次事务+快照重建+审计三联动；集合端点强制分页（缺省 20、上限钳 200、`Page<T>` 信封）；读返 `version`、更新/删除携期望 `version`，不匹配 → `409 Conflict` 并写 `policy_change` 审计 | `Stele契约 DB_PAGINATION_MANDATORY`；集成测试（真实资源：`policy.db`）；场景规格 `docs/examples/06 §4.2-10`、`docs/examples/07 §4.2 E10`（乐观锁 409） |
-| A-9 | connpool 连接管理（§3.5） | 收 `Allow{tier}` → `acquire(resource, tier)`：池键 `(ResourceCode, CredentialTier)`、不同 tier 不共享连接；向机密面一次性取不透明句柄即时传入 `Transport::open`、调用边界外即时释放；persistent 池化复用+指数退避（基数 1s/上限 60s/抖动）；超限有界排队或 deny；freeze/吊销时在用连接强制 abort/cancel；归池前会话净化（净化失败销毁不归池）；落 `connection_event`（resource/tier 名/transport 种类，不含真实地址/凭据） | 集成测试（内存 Fake：Transport/CredentialProvider）；场景规格 `docs/examples/04 §4.1 Trace ①[7b]、§4.2 E/F`、`docs/examples/06 §4.2-6` |
-| A-10 | sweeper TTL 回收（§3.6） | 后台事务性回收 `temp_grants`（写 `ended_at`/`end_reason=expired`）、`credentials.expires_at`、`mode_state.expires_at`、审批超时项，`actor=system`，写 `policy_change`/`mode_change`，回收后同写锁内重建快照；正确性不依赖 sweeper 时序——过期判定在求值时刻墙钟二次校验 | `行为契约 TEMP_GRANT_EXPIRY_EFFECTIVE`；集成测试（真实资源：`policy.db`）；场景规格 `docs/examples/06 §4.1 A、§4.2-1` |
-| A-11 | sanitize·Sanitizer 执行（§3.7） | `scrub` 整体脱敏小响应/错误/拒绝响应；`scrub_stream` 滑动重叠窗口（保留上块尾部 N 字节，N=ScrubSet 最长模式上界）防跨 chunk 逃逸、有界缓冲+背压；脱敏材料=机密面 ScrubSet 不透明句柄 + 声明级 `MaskRule` | 集成测试（内存 Fake：ScrubSet 句柄；构造跨 chunk 边界的敏感串语料）；场景规格 `docs/examples/04 §4.1 Trace ③[9]、§4.2 C` |
-
-### B. 对外接口契约（对应 §5）
-
-> 本 crate 是二进制，不向其他 workspace crate 暴露库接口——`postern-cli` 只依赖 `core` + HTTP/UDS 客户端、**不依赖本 crate**（依赖图，由 `cargo tree` 核验无 `cli → daemon` 库依赖边）；`ARCH_FORBIDDEN_EDGES` 另行兜底 `cli ↛ store/secrets`。其"对外接口"是**进程对外形态**与**内部模块对内契约**。
-
-| # | 接口（§5） | 输入 → 可观察预期结果 | 验证方式 |
-|---|---|---|---|
-| B-1 | 进程对外形态·两平面 socket（§5.1） | `data.sock`=`0660`/专用组（Agent 可连的唯一入口）；`control.sock`=`0600`（仅属主）+ 控制面认证（`SO_PEERCRED` uid 比对 + 控制面专用本地凭证）；二者为独立 axum router | 构造签名审查（两 router 绑不同 socket、权限位）；集成测试（真实资源：socket stat/连接尝试）；场景规格 `docs/examples/06 §4.2-17`、`docs/examples/07 §3 数据面（不适用）` |
-| B-2 | kernel 唯一入口 `submit`（§5.2） | `submit(req: NormalizedRequest) -> Result<SanitizedResponse, DenyResponse>`：步骤 [0] 之后与外壳无关；返回**已脱敏**结果或结构化拒绝；依赖注入集合**仅含** `PolicyView`/Adapter·Authenticator·Predicate 注册表/连接管理句柄/Sanitizer/AuditSink——**不含 PolicyRepo 与 vault 句柄** | 构造签名审查（`submit` 构造点注入集合）；集成测试（内存 Fake）；与 D-1 同源 |
-| B-3 | connpool `acquire`（§5.2） | `acquire(resource: &ResourceCode, tier: &CredentialTier) -> Result<Channel, AcquireError>`：返回一个可用通路或结构化错误；取不到/不可建 → `Err` → 上游 deny | 集成测试（内存 Fake：Transport open 成功/失败）；场景规格 `docs/examples/04 §4.2 D` |
-| B-4 | sanitize 实现 core `Sanitizer`（§5.2） | `scrub(payload, declared)` / `scrub_stream(declared)` 签名与 core 定义一致；语义符合 §3.7 承诺 | 构造签名审查（impl 与 trait 签名一致）；单元测试（脱敏行为） |
-
-### C. 边界（禁止项，对应 §4「不做什么」）
-
-> 每条给「确实没做 X / 无 X 代码路径」的可验判据；能用契约/依赖图/构造签名机器验证者优先标注。
-
-| # | 边界（§4）「不做什么」 | 可验判据 | 验证方式 |
-|---|---|---|---|
-| C-1 | 不做 tier 选择（动词→tier 归策略引擎） | connpool 只接收已选 `Allow{tier}` 取连接，无任何"动词→tier"映射代码路径 | 构造签名审查（`acquire` 入参已含 `tier`，无 verb 入口）；场景规格 `docs/examples/04 §4.1 Trace ①[6]` |
-| C-2 | 不构造 ScrubSet（构造/持有归机密面） | `sanitize/` 只持不透明 match-and-erase 句柄，不可枚举、不可序列化 ScrubSet；本 crate 无 ScrubSet 构造点 | 构造签名审查（`sanitize/` 无 ScrubSet 构造点，只接收机密面签发的不透明句柄；ScrubSet 不可枚举/序列化由机密面侧类型纪律保证，daemon→secrets 是允许边，非本契约可判，故此处靠签名审查兜底） |
-| C-3 | 不构造机密类型 `ResolvedTarget`/`ResourceCredential`（归机密面） | 本 crate 无 `ResolvedTarget`/`ResourceCredential` 构造点；句柄即时传入 `Transport::open` 后释放，无明文读取路径 | `Stele契约 SEC_CONSTRUCTION_SITES`（机密类型只在 postern-secrets 构造）；构造签名审查 |
-| C-4 | 不持有 `PolicyRepo`/PolicySnapshot 构建（写路径/快照构建归存储层） | 数据面注入集合无 `PolicyRepo`；本 crate 只消费 `PolicyView::snapshot()` 只读快照，不构建快照 | 构造签名审查（数据面 router 注入集合）；`Stele契约 ARCH_FORBIDDEN_EDGES` |
-| C-5 | 不做单条通路的物理建立/保活/关闭执行（归传输） | connpool 只下达 open/close/abort 指令，物理执行落在 `Transport`/`Channel`；本 crate 不实现心跳/续约 | 构造签名审查（connpool 经 `Transport`/`Channel` 行使，无物理 IO）；场景规格 `docs/examples/06 §2.4`（决策者/执行者分离） |
-| C-6 | 不做 `classify`/`check_constraint`/`execute`/`discover` 协议逻辑（归适配器） | kernel/control 只调 `Adapter` 方法，不内含协议意图解析；适配器只见 `Channel`、不可达地址/凭据 | `Stele契约 ARCH_FORBIDDEN_EDGES`（`adapters ↛ secrets/transports/store`，组装点把已脱地址通路交适配器使该禁止边运行时成立）；构造签名审查（kernel/control 仅调 `Adapter::classify/check_constraint/execute/discover`，无协议解析代码）；场景规格 `docs/examples/04 §4.1`（适配器经获取的 `Channel` 执行、不可达地址/凭据） |
-| C-7 | 不定义审计 schema / 记录纪律定义 / 网关凭证语义规则（归 core/store 与身份域） | 本 crate 只执行纪律（落 `AuditEvent`）、注册认证器，无 schema/规则定义代码 | 构造签名审查（无 schema 定义、纪律执行经 `AuditSink`）；`Stele契约 ARCH_FORBIDDEN_EDGES` |
-| C-8 | 不做 TTL 过期判定（归策略引擎求值时刻墙钟），sweeper 只做可见性回收 | sweeper 无"是否过期"的求值判据，仅按 `expires_at < now` 回收+留痕；求值时刻墙钟二次校验在 core | `行为契约 TEMP_GRANT_EXPIRY_EFFECTIVE`（墙钟判定在求值）；场景规格 `docs/examples/06 §2.1` |
-| C-9 | 不承载控制面瘦客户端/SPA/桌面壳/stdio 桥客户端入口（归 cli + 桌面外壳） | 本 crate 是被调方（control 端点），无客户端渲染/桥客户端入口代码 | `Stele契约 ARCH_FORBIDDEN_EDGES`（`cli ↛ store/secrets`；cli 不依赖 daemon）；场景规格 `docs/examples/04 §3 CLI`（数据面发起非 CLI 职责） |
-
-### D. 必守不变量（对应 §7，沿用 §7 已标强制手段）
-
-| # | 不变量（§7） | 验证判据 | 验证方式 |
-|---|---|---|---|
-| D-1 | 数据面 handler 注入集合**不含** PolicyRepo 与 vault 句柄（只有 `PolicyView`/`AuditSink`/连接池/Sanitizer/注册表） | `submit` 与数据面 router 构造点注入集合不出现 `PolicyRepo`/vault 类型 | `构造签名审查`（红线 7.2-2）；`Stele契约 ARCH_FORBIDDEN_EDGES`（跨 crate 禁止边） |
-| D-2 | 两平面 socket 权限隔离：`control.sock=0600`、`data.sock=0660`/专用组；二独立 router、注入集合不同 | socket 创建顺序与权限位符合 §5.1；两 router 注入集合机器可区分 | `构造签名审查`；集成测试（真实资源：socket 权限位） |
-| D-3 | 同 uid 前置条件：`data.sock` 可连 uid 含 daemon 自身 uid → 拒绝启动；`control.sock` 叠加同 uid 也成立的控制面认证 | 同 uid 环境启动被拒；同 uid 直连 `control.sock` 须过控制面认证才放行 | `postern verify`（从模拟 Agent uid 连 `control.sock` 必须失败项，详细设计 5.5）；集成测试（真实资源：`control.sock` 连接尝试）；场景规格 `docs/examples/06 §4.2-17` | |
-| D-4 | `ConnOrigin` 只由 `shells` listener 层构造，绝不采信请求自报字段 | listener 外无 `ConnOrigin` 构造点；自报 origin 字段不被采信 | `Stele契约 SEC_CONSTRUCTION_SITES`（`ConnOrigin` 只在 daemon shells 构造）+ 反例自检；场景规格 `docs/examples/06 §4.2-16` |
-| D-5 | 审计相对执行时序：只读 deny / intent 写不进执行前 deny / 已执行绝不返回 deny / outcome 失败返回"已执行但审计降级" | 三类写失败路径行为符合 §3.2 时序 | `行为契约 AUDIT_FAILURE_DENIES`（纯内存 Evaluator 驱动的 `test_contract` 用例）；场景规格 `docs/examples/07 §4.2 E1/E2` |
-| D-6 | 一切离开内核的字节必经 Sanitizer，套 `{error:{code,message}}` 信封、`message` 仅常量安全文案 | 不存在绕过 Sanitizer 的输出路径；CatchPanic 兜底 panic 响应体 | `构造签名审查`（内核唯一出口，红线 7.2-3）；集成测试（内存 Fake：遍历正常/错误/拒绝/panic 出口）；场景规格 `docs/examples/07 §4.2 E4` |
-| D-7 | 求值路径（`kernel/`）禁吞错放行（`.ok()`/`.unwrap_or(true)`/`.unwrap_or_else(\|_\| true)`/`.unwrap_or_default()`） | `crates/postern-daemon/src/kernel/` 无吞错放行写法 | `Stele契约 EVAL_NO_ERROR_SWALLOWING`（扫描 kernel 路径）+ 反例自检；`clippy unwrap_used/expect_used`（-D warnings） |
-| D-8 | 不同 tier 不共享连接；无法建通路 → deny；超限绝不静默放行 | 池键含 `CredentialTier`；建连失败/超限均解析为 deny 或有界排队 | 集成测试（内存 Fake：Transport open 失败、并发超限）；场景规格 `docs/examples/04 §4.2 D/E` |
-| D-9 | 归池前会话净化为不变量——净化失败的连接销毁而不归池 | 复用前重置会话态；净化失败 → 销毁不归池（fail-closed） | 集成测试（内存 Fake：注入净化失败）；场景规格 `docs/examples/04 §4.2 F` |
-| D-10 | 内核对策略状态只读；策略写入唯一入口 `control`/`sweeper` 经 `PolicyRepo`，写入=事务+快照重建+审计三联动 | 数据面无 `PolicyRepo`；写端点三联动缺一即整体失败 | `构造签名审查`（平面隔离注入）；集成测试（真实资源：`policy.db`）；场景规格 `docs/examples/06 §4.2-14`（三联动任一失败整体失败） |
-| D-11 | 系统自动机（sweeper/import）与人写走同一事务路径、同等审计（`actor=system`）；正确性不依赖 sweeper 时序 | 系统协调写经同一 `PolicyRepo` 路径、落同等审计；过期判定在求值时刻墙钟 | `行为契约 TEMP_GRANT_EXPIRY_EFFECTIVE`；集成测试（真实资源）；场景规格 `docs/examples/06 §4.2-1` |
-| D-12 | `on_timeout` 恒 `deny`（导入校验与设置写入两处都拒 allow）；daemon 重启时一切挂起审批恒 deny | 设置/导入写入 `on_timeout=allow` 被拒；重启后挂起审批一律 deny | `行为契约 ESCALATE_FOLDS_TO_DENY`；场景规格 `docs/examples/06 §4.2-9`、`docs/examples/05 §2.5` |
-| D-13 | `unsafe_code=forbid`（全 crate）；`SO_PEERCRED` 走安全 API（`tokio UnixStream::peer_cred`） | 本 crate 无 `unsafe`；peer_cred 经安全 API | `clippy`（workspace lints，`unsafe_code=forbid`，CI `-D warnings`）；`构造签名审查`（peer_cred 调用点） |
-
-### E. 与相邻模块交互（对应 §6，每条按 方向/类型/时机/失败语义=fail-closed 可验）
-
-| # | 交互（§6） | 方向·类型·时机 → 失败语义可验判据 | 验证方式 |
-|---|---|---|---|
-| E-1 | ← core `Evaluator`（§6.1） | daemon→core；`kernel` 在 [4] `check_constraint` 后调 `evaluate(&NormalizedRequest,&ClassifiedIntent,&ConstraintCheck,&PolicySnapshot,now)`（步骤 [1][3][5][6]）→ 一切 `Err` 解析为 deny、`Deny`/`Escalate(fallback)` 经出口脱敏 | `Stele契约 EVAL_NO_ERROR_SWALLOWING`（kernel 路径）；集成测试（内存 Fake：Evaluator 返 Err/Deny/Escalate）；场景规格 `docs/examples/05 §2、§4.1` |
-| E-2 | ← store `PolicyView`（§6.2 数据面读） | `kernel`→store；每请求 [1]~[6] 读 `snapshot()->Arc<PolicySnapshot>`（无锁、不含 vault）→ 读路径无失败点；快照不可得（极端启动）→ boot fail-closed 拒绝启动 | 集成测试（内存 Fake：`PolicyView`）；与 A-1 同源（boot 快照不可得→拒启） |
-| E-3 | ← store `PolicyRepo`（§6.2 控制面写，仅 control/sweeper 可达） | `control`/`sweeper`→store；每次策略变更事务读写，COMMIT 后同写锁内重建快照 → 事务失败/版本冲突 → 不 COMMIT、不重建、返 `409`/错误并写审计；**`PolicyRepo`/vault 绝不注入数据面 router** | `构造签名审查`（红线 7.2-2，数据面无 `PolicyRepo`）；集成测试（真实资源：`policy.db`）；场景规格 `docs/examples/07 §4.2 E10`（409） |
-| E-4 | ← store `AuditSink`（§6.2 观测面落地） | `kernel`/`connpool`/`control`/`sweeper`→store；[7a]/[10]/建连·剔除·回收/写入后调 `record(AuditEvent)`（写入前过 Sanitizer）→ 只读 deny / intent 写不进执行前 deny / outcome 失败"已执行但审计降级"、绝不 deny | `行为契约 AUDIT_FAILURE_DENIES`；集成测试（内存 Fake：注入 record 失败）；场景规格 `docs/examples/07 §4.2 E1/E2` |
-| E-5 | ← secrets `MasterKeySource`（§6.3 启动解锁） | `boot`→secrets；启动序列第 3 步（开放数据面前）调 `obtain()` 得 `Zeroizing<[u8;32]>` → 解锁失败/格式版本不识别 → fail-closed 拒绝启动，写 `lifecycle` 审计 | 集成测试（真实资源：`vault.postern`，注入坏 payload/版本）；场景规格 `docs/examples/02 §4.2 E9`、与 A-1 同源 |
-| E-6 | ← secrets `CredentialProvider`+resolve（§6.3 建连取句柄） | `connpool`→secrets；步骤 [7b] 调 `credential_for(res,tier)`/`resolve(code)` 得不可 Clone/Serialize、`Debug=REDACTED` 句柄（生命周期不出本次建连）→ 取不到/解析失败 → `acquire` 错误 → [7b] deny；本 crate 不可读明文 | `Stele契约 SEC_SECRET_TYPE_DISCIPLINE`（机密类型禁 derive Clone/Serialize）+ `SEC_CONSTRUCTION_SITES`（禁本 crate 构造）；集成测试（内存 Fake）；场景规格 `docs/examples/04 §4.2 D/G` |
-| E-7 | ← secrets ScrubSet 句柄（§6.3 脱敏材料） | secrets→`sanitize/`；解锁后获取、保险箱写入更新后刷新；步骤 [9] 应用 → 句柄不可枚举/序列化，内容永不出现在任何输出路径 | 构造签名审查（`sanitize/` 只持不透明句柄）；集成测试（内存 Fake：ScrubSet）；场景规格 `docs/examples/04 §4.2 C`、`docs/examples/07 §4.2 E4` |
-| E-8 | ← transports `open`/健康/关闭（§6.4） | `connpool`→transports；步骤 [7b] 传 `ResolvedTarget`/`ResourceCredential` 入 `open` 得 `Channel`；freeze/吊销时 abort、回收时关闭 → `open` 失败→`acquire` 失败→deny；重建/退避归本 crate、传输只报通路死亡；跨边界错误已脱敏为不含真实地址（红线 7.2-1） | 集成测试（内存 Fake：Transport open 成功/失败/上报死亡）；场景规格 `docs/examples/04 §4.2 D`、`docs/examples/06 §4.2-6` |
-| E-9 | ← adapters `classify`/`check_constraint`/`execute`/`discover`（§6.5） | `kernel`→adapters：[2] `classify`（无法归类→`ClassifyError`→deny，白名单宁误拒）、[4] `check_constraint`（`false`/`Err`→deny 短路）、[8] `execute`（错误经出口脱敏返回、已执行绝不 deny）；`control`→adapters：`discover`（接入侧探测，发现≠授权，绝不暴露给数据面） | `行为契约 UNCLASSIFIABLE_INTENT_DENIED`（classify Err 恒 deny）+ `Stele契约 ARCH_FORBIDDEN_EDGES`（适配器只见 Channel）；集成测试（内存 Fake）；场景规格 `docs/examples/04 §4.2 A`、`docs/examples/02 §4.1`（discover） |
-| E-10 | ← cli（§6.6 被调方，经控制面 API） | cli→`control`（HTTP/JSON over `control.sock`）；每条 `postern ...` 管理命令=一次控制面调用 → 认证不通过/同 uid 自检语义→拒绝服务该连接；统一 `{error:{code,message}}` 常量安全文案；`cli ↛ store/secrets` | `Stele契约 ARCH_FORBIDDEN_EDGES`（`cli ↛ store/secrets`）；集成测试（真实资源：control.sock 连接尝试）；场景规格 `docs/examples/06 §4.2-12/17` |
-
-### F. 失败与边界行为（关键 fail-closed 路径逐条可验）
-
-| # | fail-closed 路径 | 触发 → 可观察预期结果 | 验证方式 |
-|---|---|---|---|
-| F-1 | 启动前置不成立 → 拒绝启动 | 开库失败/迁移版本不符/`settings` 未知 key/快照不可得/解锁失败/同 uid 自检失败 → 进程拒绝启动，数据面 socket 未开放 | 集成测试（真实资源）；`postern verify`（`data.sock` 可连 uid 不含 daemon 自身 uid 项，详细设计 5.5）；场景规格 `docs/examples/02 §4.2 E9` |
-| F-2 | 求值任一步判拒 → 短路 deny | [1] 认证失败(`stage=auth`)/[2] 不可归类(`stage=classify`)/[3] 无格(`stage=rbac`)/[4] 细则不过(`stage=constraint`)/[5] 条件/模式不过(`stage=condition`)/[7b] 不可建(`stage=connect`) → 结构化 `DenyResponse`、不执行 [8] | 集成测试（内存 Fake）；场景规格 `docs/examples/05 §2.1 stage 分流`、`docs/examples/04 §4.2 A/D` |
-| F-3 | 连接不可建 → deny（不降级/不静默重试到他路） | `acquire` 无法建到 `(resource,tier)` 通路 → `decision=deny, stage=connect`（脱敏不含真实地址） | 集成测试（内存 Fake：open 失败）；场景规格 `docs/examples/04 §4.2 D` |
-| F-4 | 超并发上限 → 有界排队或 deny | 超每资源/全局上限 → 有界排队后服务或确定 deny；observe 大流有界缓冲+背压；绝不无界堆积 | 集成测试（内存 Fake：制造超限/慢消费）；场景规格 `docs/examples/04 §4.2 E` |
-| F-5 | 审计不可记 → 不放行（两阶段时序） | 只读 record 失败→deny；intent 写不进→执行前 deny（确未执行）；outcome 失败→"已执行但审计降级"错误码非 deny | `行为契约 AUDIT_FAILURE_DENIES`；场景规格 `docs/examples/07 §4.2 E1/E2` |
-| F-6 | 模式/吊销/TTL 收紧 → 在飞强制中断 | freeze/吊销时对相关 `(resource[,principal])` 在用连接强制 abort/cancel（非优雅排空），写 `connection_event` | 集成测试（内存 Fake：在飞连接 + freeze 信号）；场景规格 `docs/examples/06 §4.1 C、§4.2-6` |
-| F-7 | escalate / 超时 / 重启挂起审批 → 恒 deny | 审批关闭/超时/重启挂起 → `decision=escalate_denied` 或 deny，绝不悬挂等待 | `行为契约 ESCALATE_FOLDS_TO_DENY`；场景规格 `docs/examples/05 §2.5/§4.2 C`、`docs/examples/06 §4.2-9` |
-| F-8 | panic → 脱敏 deny + `kind=anomaly` 审计 | 数据面 handler panic → CatchPanic 转脱敏 deny 响应 + 一条 `kind=anomaly` 审计，绝不成为不留痕失败路径 | 集成测试（内存 Fake：注入 panic）；`clippy panic/unwrap_used/indexing_slicing`（收窄 panic 源）；场景规格 `docs/examples/07 §4.2`（审计连续性） |
-| F-9 | Scope 外/不存在资源探测 → deny 且不泄露存在性 | 调 Scope 外资源代号 → [3] deny，拒绝响应 `your_grants` 只含自身世界，不区分"不存在/无权" | `行为契约 DENY_RESPONSE_SCOPE_BOUNDED`；`postern verify`（Scope 外访问项 4）；场景规格 `docs/examples/04 §4.2 I`、`docs/examples/07 §4.2 E5` |
-| F-10 | red-team 自检载体（本 crate 承载 verify 全九项运行） | `POST /v1/verify` → daemon 以临时低权 Principal 自发九类应被拒请求走完整 [0]→[10]，八项 deny+1 项脱敏放行均进审计；任一项未被拒 → verify FAIL 指出缺口 | `postern verify`（九项全集）；场景规格 `docs/examples/07 §4.1 C、§4.2 E6`、`docs/examples/02 §4.1`（接入后 verify） |
-
-### 供应链与构建门禁（贯穿全 crate）
-
-| # | 判据 | 验证方式 |
+| 编号 | 要求（必须实现） | 通过判定（满足即过，否则不过） |
 |---|---|---|
-| G-1 | 工作区不引入 `uuid`/`ulid`/`nanoid` 等替代 id 库（连同传递依赖）；id 一律雪花字符串序列化 | `cargo deny`（`[bans]` 列 id 库含传递依赖）；`Stele契约 DB_UNIFIED_ID_GENERATOR`（直接依赖文本扫描） |
-| G-2 | 依赖图无禁止边（daemon 可依赖全部下游，但数据面注入集合不含 PolicyRepo/vault；adapters/transports/cli/core 禁止边成立） | `Stele契约 ARCH_FORBIDDEN_EDGES` + 反例自检；`cargo tree`（冗余校验） |
-| G-3 | CI 门禁全绿：`cargo fmt --check`、`cargo clippy -- -D warnings`、`cargo hack check --each-feature`、`cargo test --workspace`（含 `test_contract`）、`cargo deny check`、`stele check` | `clippy`/`cargo tree|deny`/`postern verify`（发布前必跑） |
+| F-1 boot 启动序列（§3.1·1-5） | 按固定时序拉起并 fail-closed 自检 | 启动 `posternd` 时序恰为「开库+校验 `user_version`/迁移版本/`settings` 表 → 重建首份 `Arc<PolicySnapshot>` → 解锁 `vault.postern` 并写 `lifecycle` 审计 → 注册插件 → 先建 `control.sock(0600)` 后建 `data.sock` 挂数据面 router」；任一前置不成立 → 进程非零退出、`data.sock` 未创建（场景 `docs/examples/02 §4.2 E9`） |
+| F-2 `data.sock` 可连 uid 自检（§3.1·6） | 同 uid 即拒启动（硬前置条件②） | 构造 `data.sock` 可连 uid 集合**含 daemon 自身 uid** 的环境 → 启动被拒（非零退出、数据面未开放）；可连 uid 不含自身 uid → 正常开放。判据：`postern verify` 项「`data.sock` 可连 uid 不含 daemon 自身 uid」该条 PASS（详细设计 5.5/6.7） |
+| F-3 kernel 管线 [0]→[10] 编排（§3.2） | 内核按管线逐步短路、[4] 先于 evaluate、写动词执行前先落 intent | 提交一条放行 query 请求 → 观测到的调用序恰为 `Adapter::classify`[2] → `Adapter::check_constraint`[4] → `Evaluator::evaluate`[1][3][5][6] → `acquire`[7b] → `Adapter::execute`[8] → `Sanitizer::scrub`[9] → `AuditSink::record`[10] 单条；同一请求若为有副作用动词（mutate）→ 在 `Adapter::execute` 之前多一条 [7a] intent `AuditSink::record`，只读动词（query/observe）则无 [7a]；`check_constraint` 的调用栈位置严格早于 `evaluate`（场景 `docs/examples/04 §4.1 Trace ①②③`）【行为观察】 |
+| F-4 数据面外壳 HTTP+MCP（§3.3） | 两形态归一化为同一 `NormalizedRequest`、同管线 | 同一逻辑请求分别经 HTTP 与 MCP 入口 → [0] 后内核所见 `NormalizedRequest` 等价、决策/匿名化/脱敏/审计四项结果逐字段相同；MCP 工具集恰为固定动词工具 `postern_grants`/`postern_query`/`observe`/`mutate`/`execute`/`manage`/`destroy`/`postern_surface`，不随授权增删（场景 `docs/examples/04 §4.1`、`docs/examples/05 §2.1`）【行为观察】 |
+| F-5 `postern_surface`（§3.3·CONS-20） | 返回授权快照投影，不触 discover | 调 `postern_surface()` → 返回该 Principal Scope 内已授权能力面（快照投影），且返回对象集 ⊆ 当前快照已授权对象（不含任何未圈选/未授权对象）；surface 代码路径**无 `Adapter::discover` 调用、无底层资源触达**（场景 `docs/examples/02 §4.2 E8`、`docs/examples/06 §3.3`，详细设计 6.8）【人工：surface 路径调用集审查 + 行为观察】 |
+| F-6 control 控制面端点全集 + 审批（§3.4） | §6.5 端点全集可达、写端点三联动、集合分页、乐观锁 | 启动后经 `control.sock` 列出端点，恰覆盖 §6.5 全集（principals/credentials/roles/bindings/resources〔含 `POST /v1/resources/{code}/discover`〕/constraints/conditions/deny-notes/settings/grants·temp/mode/grants 视图/audit/denials·summary/**approvals**/export/import/verify/health/shutdown）；任一写端点 = 事务+快照重建+审计三事件齐发；任一集合端点缺 `page_no/page_size` → 用缺省 20、传 `page_size=300` → 实际钳到 200、返回 `Page<T>` 信封；更新带过期 `version` → `409 Conflict` 并落 `policy_change`（场景 `docs/examples/07 §4.2 E10`） |
+| F-7 connpool 连接管理（§3.5） | 池键 `(资源,tier)`、取句柄即释、池化/退避/上限/中断/净化/审计 | 收 `Allow{tier}` → `acquire(resource, tier)` 用池键 `(ResourceCode, CredentialTier)`；建连时一次性取不透明句柄即时传入 `Transport::open`、调用边界外句柄不可再读；persistent 通路复用、断连按指数退避（基数 1s/上限 60s/带抖动）重连、非长连接即用即弃；落 `connection_event`（字段恰为 resource/tier 名/transport 种类，无真实地址/凭据）（场景 `docs/examples/04 §4.1 Trace ①[7b]`、`docs/examples/06 §4.2`）【行为观察】 |
+| F-8 sweeper TTL 回收（§3.6） | 事务性回收过期记录、`actor=system`、回收后重建快照 | 构造一条 `expires_at < now` 的 `temp_grants`（及一条到期 `credentials.expires_at`、一条到期 `mode_state.expires_at`、一条超时审批项）后驱动一轮 sweeper → 该 `temp_grants` 行 `ended_at` 非空且 `end_reason=='expired'`、四类到期项均经事务回收、其 `created_by==updated_by=='system'`、对应落一条 `policy_change`/`mode_change` 审计、且快照在同一写锁临界区内被重建（重建后快照不含该过期项）；任一项不满足即不过（场景 `docs/examples/06 §4.1 A`）【行为观察】 |
+| F-9 sanitize·Sanitizer 执行（§3.7） | 实现 core `Sanitizer`，小响应整体脱敏、流式滑窗；ScrubSet 仅持不透明句柄 | `sanitize/` 实现 `scrub(payload, declared)`/`scrub_stream(declared)`，签名与 core `Sanitizer` 一致；构造一段敏感串**跨 chunk 边界**的语料喂 `scrub_stream` → 输出该敏感串被擦除（保留上块尾部 N 字节参与下块匹配，N=ScrubSet 最长模式上界）；脱敏材料恰为机密面 ScrubSet 不透明句柄 + 声明级 `MaskRule`，且 `sanitize/` 持有的 ScrubSet 句柄类型**只暴露 match-and-erase**、无枚举/序列化方法（不可列出模式、不可 `Serialize`），ScrubSet 构造点不在本 crate（场景 `docs/examples/04 §4.1 Trace ③[9]`）【行为观察 + 人工：ScrubSet 句柄类型签名审查】 |
+| F-10 出口唯一脱敏调用点（§3.2·§5.2） | `submit` 唯一入口、CatchPanic 兜底 | 内核唯一入口签名为 `submit(req: NormalizedRequest) -> Result<SanitizedResponse, DenyResponse>`；遍历正常响应/`execute` 错误/拒绝响应/外壳层 4xx/框架错误/panic 五类出口 → 每一类字节都经 `sanitize/` 同一 Sanitizer 后才离开内核，套 `{error:{code,message}}` 信封、`message` 仅常量安全文案（场景 `docs/examples/04 §4.2 C`、`docs/examples/07 §4.2 E4`）【人工：出口穷尽性 + 行为观察】 |
 
-### 需人工审查（无法完全机器验证）项
+### 二、逻辑正确性（判断：关键逻辑、边界、失败处理对不对）
 
-以下条目部分判据**只能靠构造签名审查或人工审查**，标出以便审查者重点核验（其余可由契约/lint/测试机器验证）：
+| 编号 | 要求（行为必须正确） | 通过判定 |
+|---|---|---|
+| L-1 两平面 socket 权限隔离 | control 仅属主、data 专用组；注入集合不同 | `stat control.sock` 的模式位**恰为** `0600`（仅属主可读写）；`stat data.sock` 的模式位**属于** {`0660` + 专用组属主} 这一允许集（Agent 与 daemon 不同 uid、经专用组放行）；`control.sock` 与 `data.sock` 是绑不同路径的两个独立 axum router；从 daemon 自身 uid 裸连 `control.sock` 不带控制面凭证 → 连接被拒/认证失败，须过控制面认证（`SO_PEERCRED` uid 比对 + 控制面专用本地凭证）方放行（场景 `docs/examples/06 §4.2-17`）【人工：socket stat + 连接尝试】 |
+| L-2 数据面注入集合无 PolicyRepo/vault | `submit` 与数据面 router 构造点注入集合不含写路径与机密句柄 | `submit` 构造点注入集合**仅含** `PolicyView`（只读快照）/Adapter·Authenticator·Predicate 注册表/连接管理句柄/Sanitizer/AuditSink；其中**不出现** `PolicyRepo` 与 vault 句柄类型（红线 7.2-2）【人工：构造函数签名审查】 |
+| L-3 两阶段审计时序：已执行绝不返 deny | 只读 deny / intent 写不进执行前 deny / outcome 失败=已执行但审计降级 | 注入 `AuditSink::record` 失败：①只读动词 record 失败 → 该请求返回 `Deny`；②有副作用动词 [7a] intent 写不进 → 执行前 `Deny`（`Adapter::execute` 未被调用）；③有副作用动词已 `execute` 后 [10] outcome 写失败 → 返回"已执行但审计降级"可识别错误码、**绝不返回 deny**（场景 `docs/examples/07 §4.2 E1/E2`）【行为观察】 |
+| L-4 一切离开内核的字节经 Sanitizer（含 panic） | 无绕过出口；panic→脱敏 deny + `kind=anomaly` | 数据面 handler 内注入 panic → CatchPanic 层转为脱敏后的 `DenyResponse` + 落一条 `kind=anomaly` 审计，进程不崩、无不留痕失败路径（场景 `docs/examples/07 §4.2 E4`）【行为观察】 |
+| L-5 求值任一步判拒 → 短路 deny 且 stage 正确 | 认证/归类/RBAC/细则/条件/建连失败各短路 | 分别注入：认证 `Err` → `Deny{stage=auth}`；不可归类 `ClassifyError` → `Deny{stage=classify}`；无授权格 → `Deny{stage=rbac}`；`ConstraintCheck{passed:false}` → `Deny{stage=constraint}`；条件谓词/模式不过 → `Deny{stage=condition}`；`acquire` 不可建 → `Deny{stage=connect}`；六种均不执行 [8]（场景 `docs/examples/05 §2.1`、`docs/examples/04 §4.2 A`）【行为观察】 |
+| L-6 连接不可建 → deny（不降级、不改路） | `acquire` 失败即 deny，脱敏不含真实地址 | 注入 `Transport::open` 失败 → `acquire` 返回 `Err` → 上游返回 `decision=deny, stage=connect`，错误经脱敏、不含真实地址串；绝不静默重试到他路或降级放行（场景 `docs/examples/04 §4.2 D`）【行为观察】 |
+| L-7 超并发上限 → 有界排队或 deny | 超限走有界排队或 deny，容量常量封顶 | 制造超每资源/全局上限 N 的并发 → 第 N+1 个请求的结果属于「在有界队列内等待至有空位后服务」或「立即 `decision=deny, stage=connect`」二者之一（fail-closed），不出现第三种；持续灌注远超 N 的 observe 大流时，排队/缓冲占用的观测峰值 `≤` 该资源/全局的常量队列上限 `Q`（与灌注量无关、触顶即背压或 `deny, stage=connect`）：占用超过 `Q` 即不过（场景 `docs/examples/04 §4.2 E`）【行为观察】 |
+| L-8 不同 tier 不共享连接 | 账号隔离在连接粒度成立 | 同一资源、两个不同 `CredentialTier` 的请求 → 落在两个不同池槽（池键含 tier），永不复用同一底层连接（场景 `docs/examples/04 §4.1`）【行为观察】 |
+| L-9 归池前会话净化（净化失败销毁不归池） | 复用前强制重置、失败即销毁 | 连接归池前强制重置会话态（如 PostgreSQL `DISCARD ALL`、重置 `search_path`、回滚未决事务、清临时表）；注入净化失败 → 该连接被销毁、**不归池**（fail-closed），下个请求拿到的是干净连接（场景 `docs/examples/04 §4.2 F`）【行为观察】 |
+| L-10 freeze/吊销在飞强制 abort | 收紧时在用连接强制中断，非优雅排空 | 一条底层查询在飞时下达 freeze 或吊销 → 连接管理对相关 `(resource[, principal])` 在用连接强制 abort/cancel（取消查询、关隧道），写 `connection_event`；不等其优雅跑完（场景 `docs/examples/06 §4.2-6`）【行为观察】 |
+| L-11 TTL 求值时刻即刻失效 | 失效不依赖 sweeper 时序 | 临时格 `expires_at` 已过但 sweeper 尚未回收时发起请求 → 求值在该时刻按墙钟二次校验 `expires_at >= now` 判定 → `Deny`；daemon 重启后用原临时格请求，TTL 按绝对墙钟续计、不重置不延长（场景 `docs/examples/06 §4.2-5`）【行为观察】 |
+| L-12 escalate / 超时 / 重启挂起审批 → 恒 deny | 审批关或超时即 deny，绝不悬挂 | 命中 escalate 格且审批关闭 → 立即返回 `decision=escalate_denied`（与普通 deny 可区分），不挂起；`on_timeout` 固定 `deny`：设置/导入写入 `on_timeout=allow` 被拒；daemon 重启后一切挂起审批一律 deny（场景 `docs/examples/06 §4.2-9`、`docs/examples/05 §2.5`）【行为观察】 |
+| L-13 拒绝只说自身世界、不泄露存在性 | Scope 外与不存在资源不可区分 | 分别请求"Scope 外但存在的资源"与"根本不存在的资源" → 两次 `DenyResponse` 完全相同（`stage=rbac`，`your_grants` 只含自身授权世界），不可区分（场景 `docs/examples/04 §4.2 I`、`docs/examples/07 §4.2 E5`，`postern verify` 项 4）【行为观察 + verify 项 4】 |
+| L-14 内核对策略只读、写入唯一入口三联动 | 数据面无写路径；写=事务+快照重建+审计 | 数据面任何路径不持有 `PolicyRepo`、不产生策略写入；策略写入唯一经 `control`/`sweeper` 的 `PolicyRepo`，每次写入 = 事务 COMMIT + 快照重建 + 审计三者齐发，任一失败 → 不 COMMIT、不重建快照、整体失败（场景 `docs/examples/06 §4.2-10/14`）【行为观察 + 人工注入集合审查】 |
+| L-15 系统自动机与人写同路同审计 | sweeper/import 走同一事务路径、`actor=system` | 分别驱动一次 sweeper 回收与一次 import 协调写 → 二者落库的写调用栈均经与控制面人写**同一** `PolicyRepo` 事务路径（写路径唯一性由 `DB_WRITE_PATH_CENTRALIZED` 绿背书）、各落与人写同形态的 `policy_change` 审计、写入行 `created_by==updated_by=='system'`（区别于人写的操作者标识）；正确性不依赖 sweeper 时序（过期判定在求值时刻墙钟，见 L-11）：任一项不满足即不过（场景 `docs/examples/06 §4.2-1`）【行为观察 + 人工：写路径调用集审查】 |
+| L-16 red-team 自检载体（verify 九项运行） | 本 crate 自发九类应被拒请求走完整管线 | `POST /v1/verify` → daemon 以临时低权 Principal 自发详细设计 6.7 九类请求走完整 [0]→[10]：项 1-7、9 判据为 deny（含 `stage`+`reason`），项 8 脱敏探测判据为放行且响应擦净；九项均进审计；任一项判据不满足 → verify FAIL 并指出缺口防线（场景 `docs/examples/07 §4.1 C`、`docs/examples/02 §4.1`）【`postern verify` 九项】 |
+| L-17 connpool 不做动词→tier 选择（§4 边界） | tier 选择归策略引擎，连接层只据已选 tier 取连接 | `acquire` 入参为已选定的 `(ResourceCode, CredentialTier)`，其调用栈内无任何「动词→tier」映射逻辑（不读 `Capability` 决定 tier）；构造一条 `Allow{tier=ro}` 与一条 `Allow{tier=op}` 仅 tier 不同的放行请求 → connpool 直接按入参 tier 取连接、不二次裁决 tier；tier 的产出点唯一在 `Evaluator::evaluate` 的 allow 路径（场景 `docs/examples/04 §4.1 Trace ①[6] tier 选择落策略引擎`）【人工：connpool 调用集审查 + 行为观察】 |
 
-- **B-2 / D-1 / E-3**：数据面注入集合"不含 PolicyRepo/vault 句柄"由**构造签名审查**判定（`ARCH_FORBIDDEN_EDGES` 仅保证 crate 级依赖不被禁，无法判注入集合的细粒度——daemon 合法依赖 store/secrets，注入边界靠签名审查守）。
-- **C-1 / C-5 / C-7**：tier 选择缺位、通路物理执行外移、无 schema/纪律定义——属"无此代码路径"的**构造签名审查**判据，契约只覆盖跨 crate 依赖边、不覆盖 crate 内职责越界。
-- **A-5 / D-6**："不存在任何绕过 Sanitizer 的输出路径"是全路径穷尽性命题：集成测试遍历已知出口可验，但"无遗漏出口"终需**构造签名审查**（内核为唯一出口 + CatchPanic 兜底）佐证。
-- **D-9 / A-9（会话净化、在飞 abort）**：运行期行为，依赖**集成测试（内存 Fake）**注入净化失败/在飞中断场景；非静态契约可判。
+### 三、边界与不变量（机器强制，绿/红即答案）
 
-### 完成定义（Definition of Done）
+| 编号 | 要求 | 通过判定（机器） |
+|---|---|---|
+| B-1 依赖图无禁止边 | daemon 可依赖全部下游，但 adapters/transports/cli/core 禁止边成立 | 契约 `ARCH_FORBIDDEN_EDGES`（+ `_TEETH`）绿；`cargo tree -p postern-cli -e normal` 无 `daemon`/`store`/`secrets` 边（cli 仅依赖 core + HTTP/UDS 客户端） |
+| B-2 `ConnOrigin` 只在 shells listener 构造 | 来源采集不采信自报，构造点唯一 | 契约 `SEC_CONSTRUCTION_SITES`（+ `_TEETH`）绿（`ConnOrigin` 只在 daemon shells 构造）；场景 `docs/examples/06 §4.2-16`（自报 origin 不被采信） |
+| B-3 不构造机密类型、机密不可 Clone/Serialize | 机密类型只在 secrets 构造、不可复制不可序列化 | 契约 `SEC_CONSTRUCTION_SITES` + `SEC_SECRET_TYPE_DISCIPLINE`（各 + `_TEETH`）绿（本 crate 无 `ResolvedTarget`/`ResourceCredential` 构造点；二者不 derive `Clone`/`Serialize`） |
+| B-4 求值路径（kernel）禁吞错 | `kernel/` 无吞错放行写法 | 契约 `EVAL_NO_ERROR_SWALLOWING`（+ `_TEETH`）绿（扫描 `crates/postern-daemon/src/kernel/` 无 `.ok()`/`.unwrap_or(true)`/`.unwrap_or_default()`/`.unwrap_or_else(\|_\| true)`） |
+| B-5 控制面写入纪律静态成立 | 写路径集中、逻辑删除、默认作用域、分页强制 | 契约 `DB_WRITE_PATH_CENTRALIZED`（+ `DB_WRITE_PATH_TEETH`）、`DB_LOGICAL_DELETE_ONLY`（+ `DB_LOGICAL_DELETE_TEETH`）、`DB_DEFAULT_SCOPE_EXCLUDES_DELETED`（+ `DB_DEFAULT_SCOPE_TEETH`）、`DB_NO_RAW_SQL_OUTSIDE_STORE`（+ `DB_RAW_SQL_TEETH`）、`DB_PAGINATION_MANDATORY`（+ `DB_PAGINATION_TEETH`）全绿；本 crate `control`/`sweeper` 不含 store 之外的裸 SQL、集合端点必带 `PageQuery` |
+| B-6 id/基础字段统一 | 唯一雪花 id 来源、表带统一基础字段 | 契约 `DB_UNIFIED_ID_GENERATOR`（+ `DB_ID_GENERATOR_TEETH`）、`DB_BASE_FIELDS_REQUIRED`（+ `DB_BASE_FIELDS_TEETH`）全绿；`cargo deny check` 退出码 0（`uuid`/`ulid`/`nanoid` 连同传递依赖被 `[bans]` 拒入） |
+| B-7 admin 不可授予 | admin 在类型/schema 层不可表达 | 契约 `SEC_ADMIN_NOT_GRANTABLE`（+ `_TEETH`）绿 |
+| B-8 lint 红线 | 全 crate 无 unsafe / unwrap / expect / panic | `cargo clippy -p postern-daemon --all-features -- -D warnings` 退出码 0；`unsafe_code = forbid` 生效（`SO_PEERCRED` 经 `tokio UnixStream::peer_cred` 安全 API） |
 
-**当 A（11 项功能全部实现且各按「输入→预期可观察结果」可验）、B（4 项对外/对内契约签名稳定且语义符合）、C（9 项边界确无越界代码路径）、D（13 项不变量各由其标注的 Stele契约/clippy/构造签名/行为契约守住）、E（10 项相邻交互按约定方向/类型/时机调用且失败语义均 fail-closed）、F（10 项关键 fail-closed 路径逐条可观察可验）六维度全部满足，且供应链与构建门禁全绿、本 crate 作为 `postern verify` 九项与场景 02~07 运行载体逐条通过——即视为 `postern-daemon` 模块完成。**
+### 通过定义（DoD）
+
+`postern-daemon` **算完成** ⟺ 一、二、三三组**每一条都通过**。任一条不过 = 不通过，必须修。F 类靠"启动/管线/端点给定输入看行为是否符合通过判定"；L 类靠"触发某 fail-closed 条件→行为恰为某可观察结果"（含纯内存 `Evaluator` 驱动的行为用例与 `postern verify` 九项，标【行为观察】/【人工】者拆成逐项 yes/no、全 yes 才过）；B 类靠"跑契约/`cargo tree`/`cargo deny`/clippy 看绿红/退出码"。本 crate 同时是 `postern verify` 九项与场景 02~07 的运行载体，上述各条逐项通过即该模块完成。

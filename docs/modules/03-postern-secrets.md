@@ -196,82 +196,55 @@ pub trait CredentialProvider: Send + Sync {
 
 ## 8 · 验收标准
 
-本节是 `postern-secrets` 的**验收基准**：每条给出「可观察判据」与「验证方式」，让实现者据此自检、审查者据此判定本模块是否完成。判据一律「输入→预期可观察结果」，验证方式取统一词汇。下文按 A~F 六维度组织，与本模块相关者逐条列出，不相关者明示「不适用」。**凡只能靠人工审查、无法机器验证的项，均在该条标注「仅审查」**。
+> 本节是 `postern-secrets` 的**验收基准**：拿这份清单可逐条判定开发实现的"功能写全没、逻辑对不对"。每条 = **要求 + 通过判定**，通过判定对当前代码只有"通过/不通过"一个答案，无歧义、可复现；判定方式按条目而定（行为观察 / 接口存在 / Stele 契约绿红 / 结构检查），不强求都是单元测试。
+>
+> 说明：本模块的会话来源运行期物化（live-session 缓存复用、续会话单飞、硬过期 fail-closed）是 `CredentialProvider` 会话来源实现的语义（详细设计 6.13），其判定以行为观察为主；标注"行为观察"者，按"给定输入→产出确切可观察结果"逐条判定，全部命中才算过。
 
-### 8.A 功能完整性（逐条对应 §3 功能）
+### 一、功能完整性（判断：该有的功能都写了吗、行为对吗）
 
-| # | 功能（§3） | 验收判据（输入→可观察结果） | 验证方式 |
-|---|---|---|---|
-| A1 | 保险箱解锁 | 输入：合法 `vault.postern` + 正确主密钥经 `MasterKeySource::obtain()` 取得 → 可观察：解开包裹槽得 data-key、以 XChaCha20-Poly1305 解密 payload 成功、明文头全段作为 AAD 参与校验通过，返回可用保险箱句柄。输入：篡改明文头任一字节 / data-key 错误 → 可观察：AEAD 校验失败、`UnlockError`、不返回句柄。 | `集成测试(内存Fake vault 字节)`；`场景规格 docs/examples/02 §4.2-E6` |
-| A2 | `format_version` fail-closed | 输入：vault 明文头 `format_version` 取当前实现不识别的值 → 可观察：拒绝解锁、返回 `UnlockError`，绝不尝试按未知格式解密。 | `单元测试`；不变量见 D6 |
-| A3 | 凭据解析（按 (res,tier)） | 输入：已解锁保险箱 + 存在的 `(ResourceCode, CredentialTier)` 调 `credential_for(res, tier)` → 可观察：返回一个 `ResourceCredential`（不可 Clone/Serialize、`Debug=REDACTED`）。输入：不存在的 `(res, tier)` → 可观察：返回 `CredentialError`，不返回任何凭据。 | `集成测试(内存Fake)`；`场景规格 docs/examples/04 §4.1 Trace② [7b]` |
-| A4 | 地址解析 | 输入：存在的 `code` 调 `resolve(code)` → 可观察：返回 `ResolvedTarget`（约束同 A3）。输入：未知 `code` → 可观察：`ResolveError`，无产物。 | `集成测试(内存Fake)`（已知 code→产物 / 未知 code→`ResolveError`）；解析参与建连的时机见 `场景规格 docs/examples/04 §4.1 Trace② [7b]`；解析失败下游 deny 见 F2 |
-| A5 | ScrubSet 句柄签发 | 输入：解锁后由 `targets`/`secrets` 派生 ScrubSet，向内核签发句柄 → 可观察：句柄仅暴露 match-and-erase；对句柄调用枚举/序列化在类型层即不存在该方法（编译期不可达）。输入：句柄作用于含真实地址/凭据的字节流 → 可观察：命中段被擦除。 | `构造签名审查`；`单元测试(匹配-擦除行为)`；`场景规格 docs/examples/04 §4.1 Trace③ [9]` |
-| A6 | 机密录入/更新（原子写入） | 输入：经 `vault://` 引用写入新凭据/地址 → 可观察：整体重加密、写临时文件→`fsync`→原子 `rename` 覆盖、保留上一代 `.bak`、本次 nonce 与历史不同。输入：写入中途失败 → 可观察：原 vault 不被半写损坏、`.bak` 可回退。 | `集成测试(真实文件系统)`；不变量见 D6；`场景规格 docs/examples/02 §4.1 步骤2/3` |
-| A7 | rekey / rotate-kdf | 输入：rekey 重包裹 data-key 或换 argon2id 参数（仅 passphrase 来源的包裹槽）→ 可观察：payload 加密语义不变（同一 data-key 仍可解原 payload），仅包裹槽更新。 | `集成测试(内存Fake)`；不变量见 D6/D7 |
-| A8 | 导出协调支持 | 输入：向控制面导出 → 可观察：产物只含元数据与 `vault://` 引用，逐字段扫描无任何明文地址/凭据。 | `场景规格 docs/examples/02 §4.1 步骤2`（`export` 产物逐字段可验收）；不变量见 D8 |
+| 编号 | 要求（必须实现） | 通过判定（满足即过，否则不过） |
+|---|---|---|
+| F-1 vault 格式与解锁 | vault 格式：argon2id（仅作用于 passphrase 来源）+ XChaCha20-Poly1305 + 随机 nonce + `format_version`，解锁经 `MasterKeySource::obtain()` 取主密钥→开包裹槽得 data-key→解密 payload（§3、§7-6） | 合法 vault + 正确主密钥 → 解锁成功并返回可用保险箱句柄；明文头全段作为 AEAD 的 AAD 参与校验通过；篡改明文头任一字节 / data-key 错误 → 返回 `UnlockError`、不返回句柄 |
+| F-2 MasterKeySource 四来源 | 定义 `MasterKeySource` trait 并提供四实现：`passphrase`/`key_file`/`os_keychain`/`systemd_cred`（§5.2） | `obtain(&self) -> Result<Zeroizing<[u8;32]>, UnlockError>` 存在且签名一致；四实现各自存在、由 `config.toml` 选定其一；仅 `passphrase` 经 argon2id KDF 派生，其余直接持有 32 字节主密钥 |
+| F-3 凭据解析（按 (res,tier)） | 实现 `CredentialProvider::credential_for(res, tier) -> Result<ResourceCredential, CredentialError>`（§5.3） | 存在的 `(ResourceCode, CredentialTier)` → 返回一个 `ResourceCredential`（不可 Clone/Serialize、`Debug=REDACTED`）；不存在的 `(res, tier)` → 返回 `CredentialError`、不返回任何凭据 |
+| F-4 地址解析 | 提供 `resolve(code) -> Result<ResolvedTarget, ResolveError>`（§5.4） | 存在的 `code` → 返回 `ResolvedTarget`（约束同 F-3）；未知 `code` → 返回 `ResolveError`、无产物 |
+| F-5 机密类型唯一构造 | `ResolvedTarget` / `ResourceCredential` 的构造体只在本 crate（§5.1、§7-2） | 本 crate 内存在二者的构造路径（`resolve`/`credential_for` 能产出实例）；`postern-core` 内仅有不透明声明、无构造点（构造点唯一性的机器判定见 B-2） |
+| F-6 ScrubSet 句柄签发 | 由 `targets`/`secrets` 派生 ScrubSet，以单向 match-and-erase 不透明句柄签发给内核，随保险箱写入更新（§3、§5.4） | 句柄类型层只暴露 match-and-erase；对句柄调用枚举/序列化在类型层不存在该方法（编译期不可达）；含真实地址/凭据样本的字节流经句柄 → 命中段被擦除（行为观察） |
+| F-7 会话来源三档 | `CredentialProvider` 会话来源覆盖三档：①账号密码（默认、接入期零交互）、②API token、③OAuth/强制 2FA（详细设计 6.13；§3 与会话来源并列的静态来源） | 三档各自存在解析路径；给①档已存的 vault 账号密码 + 一个临近过期会话 → 续会话成功且全程无人交互；给③档 → 运行期建连路径上不存在 2FA 触发点（2FA 仅在接入期出现），运行期会话不可续时走 deny 而非触发 2FA（行为观察） |
+| F-8 录入/更新（原子写入） | 经 `vault://` 引用承接控制面写入，整体重加密原子写（临时文件→`fsync`→`rename`，保留 `.bak`），每次随机重生成 nonce（§3、§5.5、§7-6） | 经 `vault://` 引用写入新凭据/地址 → 整体重加密、写临时文件→`fsync`→原子 `rename` 覆盖、保留上一代 `.bak`、本次 nonce 与历史采样互异；回读只得掩码或 `vault://` 引用、绝不回吐明文 |
+| F-9 rekey / rotate-kdf | 重包裹 data-key 或更换 KDF 参数（仅 passphrase 来源包裹槽），不触动 payload 加密语义（§3） | rekey / 换 argon2id 参数后 → 同一 data-key 仍可解原 payload（payload 密文未变），仅包裹槽更新 |
+| F-10 导出协调支持 | 向控制面导出只产元数据与 `vault://` 引用（§3、§7-8） | 导出产物逐字段扫描 → 只含元数据与 `vault://` 引用，无任何明文地址/凭据 |
 
-### 8.B 对外接口契约（逐条对应 §5 暴露的类型/trait）
+### 二、逻辑正确性（判断：关键逻辑、边界、失败处理对不对）
 
-| # | 接口（§5） | 验收判据 | 验证方式 |
-|---|---|---|---|
-| B1 | `ResolvedTarget` / `ResourceCredential` 类型纪律 | 两类型无 `Clone`/`Serialize`（derive 或手写均无）、`Debug` 恒输出 `REDACTED`、无 `Display`、明文置 `Zeroizing`；字段私有、域外无构造/读取路径。 | `Stele契约 SEC_SECRET_TYPE_DISCIPLINE`；`构造签名审查` |
-| B2 | 机密类型唯一构造点 | `ResolvedTarget`/`ResourceCredential` 的构造表达只出现在 `postern-secrets`；任何其他 crate 出现构造即契约红。 | `Stele契约 SEC_CONSTRUCTION_SITES` |
-| B3 | `MasterKeySource::obtain()` 签名与语义 | 签名 `obtain(&self) -> Result<Zeroizing<[u8;32]>, UnlockError>` 稳定；成功返回 `Zeroizing` 包裹的 32 字节主密钥，失败返回 `UnlockError`，错误路径不泄漏材料明文。 | `构造签名审查`；`单元测试` |
-| B4 | `CredentialProvider::credential_for` 签名与错误路径 | 签名 `async fn credential_for(&self, res, tier) -> Result<ResourceCredential, CredentialError>` 稳定；无匹配/解析失败/库不可用走 `Err` 分支，不返回缺省凭据。本域恒以 `Result::Err` 上抛（签名层即无"缺省凭据"返回路径），消费侧（`daemon::connpool`/`kernel`）对该 `Err` 不得吞为放行——后者在求值路径由契约强制。 | `构造签名审查`（返回类型为 `Result`、无缺省分支）；`集成测试(内存Fake)`（错误输入→`Err` 而非缺省）；消费侧不吞错见 E3，由 `Stele契约 EVAL_NO_ERROR_SWALLOWING`（作用域：`core::eval`/`daemon::kernel`）强制 |
-| B5 | `resolve` / ScrubSet 句柄接口 | `resolve(code) -> Result<ResolvedTarget, ResolveError>` 错误路径正确；ScrubSet 句柄仅 match-and-erase、无枚举/序列化能力（接口层不暴露）。 | `构造签名审查`；`单元测试` |
-| B6 | 录入/更新写接口回读形态 | 经写接口写入后回读 → 只返回掩码或 `vault://` 引用，绝不回吐明文。 | `集成测试(内存Fake)`；`场景规格 docs/examples/02 §4.1 步骤3` |
-| B7 | 消费 core 类型不重复定义 | `ResourceCode`/`CredentialTier` 仅从 core 消费，本域不另行定义；`ResolvedTarget`/`ResourceCredential` 的不透明声明来自 core、构造体在本域。 | `构造签名审查`；`Stele契约 SEC_CONSTRUCTION_SITES` |
+| 编号 | 要求（行为必须正确） | 通过判定 |
+|---|---|---|
+| L-1 `format_version` 不识别 → 拒锁（fail-closed） | 明文头 `format_version` 取当前实现不识别值时拒绝解锁（§7-6） | vault 明文头 `format_version` 设为不识别值 → 返回 `UnlockError`、绝不按未知格式尝试解密、不返回句柄 |
+| L-2 AAD 篡改/降级 → 拒锁 | 明文头全段作 AAD，头部篡改或版本降级即解锁失败（§7-6） | 篡改明文头任一字节（含 `format_version` 降级）→ AEAD 校验失败、返回 `UnlockError`、不返回句柄 |
+| L-3 nonce 绝不复用 | 每次写入随机重生成 24B nonce，绝不复用（§7-6） | 连续 N 次写入采样的 N 个 24B nonce 两两互异（行为观察）；nonce 取值源恒为 CSPRNG、源码无固定常量 / 计数器递增的 nonce 取值路径（结构检查） |
+| L-4 原子写半写不损坏 | 写入中途中断时原 vault 完好、`.bak` 可回退（§7-6） | 在临时文件写到一半 / `rename` 前注入中断 → 原 vault 仍可正常解锁、`.bak` 可回退、control 不提交相应策略变更 |
+| L-5 `credential_for` 配置缺失 → deny（fail-closed） | 无匹配 `(res,tier)` / 解析失败 / 库不可用一律走 `Err`、不返回缺省凭据（§5.3、§6.3） | 无匹配 `(res,tier)` → 返回 `CredentialError`（非缺省凭据）；签名层即无"缺省凭据"返回路径；下游 connpool 据此 deny（步骤[7b]"不可建→deny"） |
+| L-6 解锁前数据面不放行 | `obtain()` 失败 / 版本不识别 / AAD 失败 / 解密失败 → 不返回句柄，保险箱可用前数据面不接受任何请求（§6.2） | 解锁未成功 → 不交回保险箱句柄；数据面在保险箱可用前任一需建连请求在步骤[7b] deny（行为观察，挂 `场景规格 docs/examples/02 §4.2-E6`） |
+| L-7 账号密码会话过期无人值守重登 | 第①档会话过期/临近过期时用 vault 账号密码重新登录续会话，无人介入（详细设计 6.13） | 缓存会话临近过期（`expiry−skew`）→ 本域用 vault 账号密码重登续会话成功并回填缓存、全程无人交互（行为观察，挂 `场景规格 docs/examples/04 §4.2-B1`） |
+| L-8 live-session 缓存复用不重登 | 命中且未临近过期的会话直接复用，绝不每请求重登（详细设计 6.13） | 缓存命中且未临近过期 → 直接复用缓存会话、本次建连不触发任何登录请求（行为观察，挂 `场景规格 docs/examples/04 §4.1 Trace② [7b]`） |
+| L-9 续会话单飞（single-flight） | 同一 `(resource, tier)` 任一时刻至多一个在途续会话，并发请求等待或复用（详细设计 6.13） | 同一 `(res,tier)` 并发触发续会话 → 至多一次在途登录/刷新，其余请求复用同一在途续会话结果、无登录风暴（行为观察，挂 `场景规格 docs/examples/04 §4.1 [7b']`） |
+| L-10 会话硬过期 → fail-closed + operator_note | 续会话不可（账号密码失效/refresh token 失效/强制 2FA 无长效会话）→ 请求 deny，不在数据面静默重登/触发 2FA（详细设计 6.13、§6.3） | 续会话失败 → 该请求 deny、`reason` 述"会话不可建立/已过期需控制面更新凭据"、附 `operator_note`；本域错误/拒绝路径不回吐账号明文（行为观察，挂 `场景规格 docs/examples/04 §4.2-B2`） |
+| L-11 明文不出机密面边界 | 资源凭据/真实地址明文只活在本域内存与 `Transport::open` 调用生命周期内，不向上传递、不落审计/日志，跨 crate 边界前错误脱敏（§7-3、公理四） | 成功/错误/拒绝三类路径返回串均不含原始凭据/真实地址；任一向上抛出错误（解锁/解析/写入）在跨 crate 边界前已脱敏为不含真实地址/凭据的错误码（如绝不外泄 `connection refused to 10.0.3.17`）（行为观察，挂 `场景规格 docs/examples/04 §4.2-D/G`） |
+| L-12 ScrubSet 单向、句柄内容不外泄 | 句柄只可 match-and-erase、不可枚举/序列化，持有者亦不可读出内容，无"未擦除直出"分支（§7-5） | 接口层无枚举/序列化方法、句柄类型不可 `Serialize`；含真实地址/凭据样本字节流 → 命中段被擦除、内容不进任何输出路径；脱敏无"放行"语义分支（行为观察 + 接口存在性，端到端另挂 `postern verify 响应脱敏探测` 第 8 项） |
 
-### 8.C 边界（禁止项，逐条对应 §4「不做什么」）
+### 三、边界与不变量（契约/工具机器强制为主，绿/红即答案；B-7/B-8 为结构检查 + 文档一致性人工 checklist）
 
-| # | 禁止项（§4） | 验收判据（确实没做 / 无该路径） | 验证方式 |
-|---|---|---|---|
-| C1 | 不持有/判定 Principal 凭证 | 本 crate 无任何 Principal 凭证（网关凭证）的有效期/吊销/可信域语义代码路径；只经手资源凭据。 | `构造签名审查（仅审查）`；依赖边见 C8 |
-| C2 | 不声明/选择 CredentialTier | 本域 API 仅接收已选定的 `(res, tier)`，无任何"动词→tier 选择"逻辑；`credential_for` 入参 `tier` 由调用方给定。 | `构造签名审查（仅审查）` |
-| C3 | 不执行脱敏 | 本域只构造/更新/持有 ScrubSet 并签发句柄；无 `scrub`/`scrub_stream` 调用点（脱敏调用在 `daemon::sanitize`）。 | `构造签名审查（仅审查）`；交互见 E4 |
-| C4 | 不编排解锁时机 | 本域只提供 `obtain`/解锁操作，不含"在启动序列哪一步解锁"的编排代码。 | `构造签名审查（仅审查）` |
-| C5 | 不提供机密录入人机入口 | 本 crate 无 CLI/HTTP 录入入口，只暴露被控制面调用的写接口。 | `构造签名审查（仅审查）`；`Stele契约 ARCH_FORBIDDEN_EDGES`（`cli↛secrets`） |
-| C6 | 不建立通路/解释协议/持有连接 | 本域不依赖 `transports`、不含 `Transport::open` 实现；只在该调用边界一次性交付 `(ResolvedTarget, ResourceCredential)`。 | `Stele契约 ARCH_FORBIDDEN_EDGES`（依赖图中 secrets 与 transports 无边）；`cargo tree`（无 transports 依赖） |
-| C7 | 不持久化策略状态/不写审计载体 | 本 crate 无 rusqlite/policy.db 写路径、无 `AuditSink` 写调用；vault 载体本域自持、不经 store。 | `Stele契约 ARCH_FORBIDDEN_EDGES`（`secrets↛store` 由依赖图保证，secrets 不依赖 store）；`cargo tree`（无 store 依赖）；`构造签名审查` |
-| C8 | 不被数据面 crate 依赖 | `adapters↛secrets`、`cli↛secrets` 等禁止边不出现；本 crate 只被 `daemon` 依赖。 | `Stele契约 ARCH_FORBIDDEN_EDGES`；`cargo tree`（反向依赖仅 daemon） |
+| 编号 | 要求 | 通过判定 |
+|---|---|---|
+| B-1 机密类型纪律 | `ResolvedTarget`/`ResourceCredential` 不得 derive/手写 `Clone`/`Serialize`（§4、§7-1） | 契约 `SEC_SECRET_TYPE_DISCIPLINE`（+ `_TEETH`）绿 |
+| B-2 构造点唯一 | 两机密类型只能在 `postern-secrets` 构造（§4、§7-2） | 契约 `SEC_CONSTRUCTION_SITES`（+ `_TEETH`）绿 |
+| B-3 禁止依赖边（数据面无取用路径） | 依赖图不出现 `adapters↛secrets`、`cli↛secrets`、`transports↛store`、`core↛任何 IO crate`（§4、§6.6、§7-4） | 契约 `ARCH_FORBIDDEN_EDGES`（+ `_TEETH`）绿 |
+| B-4 不依赖 store/transports | 本 crate 不碰 store、transports（不持久化策略、不建通路）（§4、§6.6） | `cargo tree -p postern-secrets -e normal` 输出不含 `postern-store`/`postern-transports`/`rusqlite`；`cargo tree -i -p postern-secrets`（反向依赖）除自身外仅含 `postern-daemon` |
+| B-5 消费侧不吞错（fail-closed 链路） | `credential_for`/`resolve` 的 `Err` 在求值路径不得被吞为放行（§5.3、§6.3） | 契约 `EVAL_NO_ERROR_SWALLOWING`（作用域 `daemon::kernel`，含连接获取消费点，+ `_TEETH`）绿 |
+| B-6 lint 红线 | 无 unwrap/expect/panic/unsafe（fail-closed 代码规范） | `cargo clippy -p postern-secrets --all-features -- -D warnings` 退出码 0 |
+| B-7 属主一致性（不越域承担他域职责） | tier 声明/选择、脱敏调用、解锁时机编排、机密录入人机入口均不在本域（§4、§7-9） | 本 crate 不实现 `Sanitizer`（脱敏调用不在本域，由 `daemon::sanitize` 实现）、不出现 `Decision::Allow{tier}` 的 tier 选取逻辑、不出现 boot 序列编排、不暴露控制面/CLI 入口；`adapters↛secrets`/`cli↛secrets` 由 `ARCH_FORBIDDEN_EDGES` 绿同时保证（结构检查 + 契约绿） |
+| B-8 解锁强度诚实表述（防夸大） | 四 `MasterKeySource` 按 §5.2 表如实声明真实强度，不一概宣称 argon2id 保护（§7-7） | §5.2 四来源强度表述各自存在且与 §7-7 一致：仅 `passphrase` 标注 argon2id KDF 派生，`key_file`/`os_keychain`/`systemd_cred` 标注"直接持有 32B 主密钥、强度等于文件/钥匙串/凭据保护"；`passphrase` 标注与无人值守互斥、`key_file` 标注弱模式威胁后果 → 四项逐条 yes 即过（人工 checklist，文档/接口一致性判定） |
 
-### 8.D 必守不变量（逐条对应 §7，沿用 §7 已标强制手段）
+### 通过定义（DoD）
 
-| # | 不变量（§7） | 验收判据 | 验证方式（沿用 §7） |
-|---|---|---|---|
-| D1 | 机密类型纪律 | `ResolvedTarget`/`ResourceCredential` 无 `Clone`/`Serialize`、`Debug=REDACTED`、无 `Display`、明文在 `Zeroizing`；日志/tracing 在类型层即无法直接记录。 | `Stele契约 SEC_SECRET_TYPE_DISCIPLINE`（含其反例自检 teeth：在 `derive(Clone)` 反例上须检出违规） |
-| D2 | 构造点唯一 | 两机密类型仅在本 crate 构造；他处构造表达 → 契约红。 | `Stele契约 SEC_CONSTRUCTION_SITES`（含反例自检 teeth） |
-| D3 | 凭据零接触（公理四） | 资源凭据/真实地址明文只活在本域内存与 `Transport::open` 调用生命周期内；不向上传递、不落返回 Agent 的字节、不落审计/运行日志；跨 crate 边界前错误脱敏为不含真实地址/凭据的错误码。 | 类型层不可外泄由 `Stele契约 SEC_SECRET_TYPE_DISCIPLINE`（无 `Clone`/`Serialize`，`Debug=REDACTED`）保证（见 D1）；`集成测试(内存Fake)`（断言成功/错误/拒绝路径返回串均不含原始凭据/地址）；`场景规格 docs/examples/04 §4.2-G`（Agent 拿不到 app 账号）；`postern verify 响应脱敏探测`（6.7 第 8 项，诱导回显被擦净）；诚实度边界仅审查 |
-| D4 | 数据面无取用路径 | 数据面 router 注入集合不含 vault 句柄；`adapters↛secrets`/`cli↛secrets` 成立。 | `Stele契约 ARCH_FORBIDDEN_EDGES`；`场景规格 docs/examples/04 §4.2-G`（Agent 拿不到 app 账号） |
-| D5 | ScrubSet 单向性 | 句柄只可 match-and-erase、不可枚举/序列化；持有者（daemon）亦无法读出内容；内容永不进输出路径。 | `构造签名审查`（接口层无枚举/序列化方法，类型不可 `Serialize`）；`单元测试`（含真实地址/凭据样本的字节流命中段被擦除）；`场景规格 docs/examples/04 §4.1 Trace③ [9]`；句柄擦除生效另由 `postern verify 响应脱敏探测`（6.7 第 8 项）端到端验证 |
-| D6 | vault 格式与写入纪律 | 明文头全段作 AAD（头部篡改/`format_version` 降级 → 解锁失败）；`format_version` 不识别即拒锁；每次写入随机重生成 nonce、绝不复用；原子写入（临时文件→`fsync`→`rename`，保留 `.bak`），半写不损坏。 | `集成测试(真实文件系统)`（验证 nonce 不复用：连续写入采样 nonce 互异；验证半写后 `.bak` 可回退）；`单元测试`（AAD 篡改/版本降级拒绝）；`场景规格 docs/examples/02 §4.2-E6` |
-| D7 | 解锁强度诚实 | 各 `MasterKeySource` 实现按 §5.2 表如实声明强度；`passphrase` 与无人值守互斥、`key_file` 弱模式威胁后果须显式表达；不夸大「argon2id 保护」。 | `仅审查`（文档/注释级诚实声明，无机器判据） |
-| D8 | 导出永不含明文 | 导出只产元数据 + `vault://` 引用；本域是明文唯一可达处。 | `场景规格 docs/examples/02 §4.1 步骤2`（`export` 逐字段无明文）；`集成测试(内存Fake)` |
-| D9 | 属主一致性 | tier 声明/选择、脱敏调用、解锁时机编排、录入入口均不在本域代码内。 | `构造签名审查（仅审查）`；与 C2/C3/C4/C5 互证 |
-
-### 8.E 与相邻模块交互（逐条对应 §6 每个相邻交互；方向/类型/时机/失败语义可验）
-
-| # | 交互（§6） | 验收判据（方向/类型/时机 + 失败 fail-closed） | 验证方式 |
-|---|---|---|---|
-| E1 | ← core（§6.1 消费 core） | 方向：secrets→core 编译期依赖；消费 `ResourceCode`/`CredentialTier`、实现 `CredentialProvider`；core 无运行时失败面。 | `cargo tree`（依赖边 secrets→core 存在）；`Stele契约 ARCH_FORBIDDEN_EDGES`（`core↛任何 IO crate` 反向保证 core 纯净） |
-| E2 | ← daemon::boot（§6.2 解锁） | 方向：boot→secrets 调 `obtain()` 并触发解锁，在**开放数据面之前**；失败（obtain 失败/版本不识别/AAD 失败/解密失败）→ 不返回句柄、**绝不开放数据面**，错误先脱敏。 | `集成测试(内存Fake)`；`场景规格 docs/examples/02 §4.2-E6`、`docs/examples/04 §4.2-H`（重启后解锁→开放数据面顺序） |
-| E3 | ← daemon::connpool（§6.3 取凭据与地址） | 方向：connpool→secrets 调 `credential_for`/`resolve`，时机为求值步骤 **[7b] 取连接**；返回不可 Clone/Serialize 的不透明句柄，调用方仅搬运、一次性传入 `Transport::open`；失败（无匹配/解析失败/库不可用）→ 本域返回 `CredentialError`/`ResolveError`，消费侧 connpool 据此 deny 且**不吞错放行**，错误已脱敏（不泄 `connection refused to 10.0.3.17` 类原始串）。 | `集成测试(内存Fake)`（secrets 返回 `Err`、错误串无明文）；消费侧不吞错由 `Stele契约 EVAL_NO_ERROR_SWALLOWING`（作用域 `daemon::kernel`，含求值路径上的连接获取消费点）强制；`场景规格 docs/examples/04 §4.1 Trace② [7b]、§4.2-D`、`docs/examples/02 §4.2-E6` |
-| E4 | ← daemon::sanitize（§6.4 签发并应用 ScrubSet） | 方向：secrets→daemon 签发不透明句柄（签发于解锁后、更新于每次写入后、应用于步骤 **[9]**）；daemon 持有但不可读出内容；脱敏调用在内核、本域不调用；擦除单向、无「未擦除直出」分支。 | `构造签名审查`；`场景规格 docs/examples/04 §4.1 Trace③ [9]、§4.2-C` |
-| E5 | ← daemon::control（§6.5 录入与更新） | 方向：control→secrets 调写接口，经 `vault://` 引用寻址；时机在控制面写操作期间、**不在数据面管线内**；失败 fail-closed（原子写未完成保留 `.bak`、vault 不半写损坏，写失败→control 不提交策略变更）；审计由 control 落、本域不直接写审计。 | `集成测试(真实文件系统)`（半写回退见 F5 + 回读仅掩码/引用）；写入与匿名化建立见 `场景规格 docs/examples/02 §4.1 步骤2、步骤3` |
-| E6 | 被禁止依赖边（§6.6） | `adapters`/`transports`/`store`/`cli` 均不依赖本 crate；本 crate 只被 daemon 依赖。 | `Stele契约 ARCH_FORBIDDEN_EDGES`（含反例自检 teeth：adapters 声明 secrets 依赖须检出）；`cargo tree` |
-
-### 8.F 失败与边界行为（关键 fail-closed 路径逐条可验）
-
-| # | 失败路径 | 验收判据（错误→拒绝 / 不可建→拒绝 / 不可解锁→不放行） | 验证方式 |
-|---|---|---|---|
-| F1 | 解锁失败 → 不放行 | `obtain()` 失败 / `format_version` 不识别 / AAD 校验失败 / payload 解密失败 → 解锁失败、不返回句柄、数据面在保险箱可用前不接受任何请求。 | `集成测试(内存Fake)`；`场景规格 docs/examples/02 §4.2-E6` |
-| F2 | 凭据/地址不可解析 → deny | 无匹配 `(res,tier)` / `resolve` 未知 code / 库不可用 → 本域返回 `Err`、不返回缺省值；消费侧 connpool 据此 deny（步骤[7b]「不可建→deny」）且不吞错放行。 | `集成测试(内存Fake)`（本域错误输入→`Err`）；消费侧不吞错由 `Stele契约 EVAL_NO_ERROR_SWALLOWING`（作用域 `daemon::kernel`）强制；`场景规格 docs/examples/04 §4.2-D` |
-| F3 | 红队探测下本域不泄机密（凭据/地址） | 模拟红队以已吊销/过期凭证发起请求 → 认证层 deny（认证层职责，非本域）且 deny 进审计；**本域可验判据**：该探测全程本域的凭据/地址解析路径与脱敏后的拒绝响应中无任何原始凭据/真实地址泄漏。 | `postern verify 已吊销/过期凭证`（6.7 第 5 项，作为驱动该探测的集成自检）；本域非泄漏判据另由 `集成测试(内存Fake)` 断言；`场景规格 docs/examples/02 §4.1 步骤9`（九项逐条，第⑤项）、`docs/examples/04 §4.2-B(B2 硬过期)` |
-| F4 | 会话硬过期不可续 → fail-closed（本域承重面：凭据零接触） | 续会话失败（账号密码失效/refresh token 失效/强制 2FA 无长效会话）时，本域对 connpool 的凭据解析仍只交付不透明句柄、绝不在错误/拒绝路径回吐账号明文；最终请求 deny 为代号化拒绝、不泄账号信息。（"绝不数据面静默重登/触发 2FA" 的编排归 connpool/6.13，非本域。） | `集成测试(内存Fake)`（断言 deny/错误路径不含账号明文）；`场景规格 docs/examples/04 §4.2-B(B2 硬过期)` |
-| F5 | 原子写入失败 → vault 不损坏 | 写入中途中断（临时文件写到一半 / `rename` 前进程退出）→ 原 vault 完好可解锁、`.bak` 可回退、control 不提交相应策略变更。 | `集成测试(真实文件系统)`（注入中断点后断言原 vault 仍可解锁、`.bak` 回退成功）；不变量见 D6（原子写入协议）；写入路径与回读形态见 `场景规格 docs/examples/02 §4.1 步骤3` |
-| F6 | 跨边界错误脱敏 | 任一向上抛出的错误（解锁/解析/写入）在跨 crate 边界前已脱敏为不含真实地址/凭据的错误码。 | `集成测试(内存Fake)`（断言错误串不含明文）；`场景规格 docs/examples/04 §4.2-D/G`；诚实度边界部分仅审查 |
-
-### 8.G 完成定义（Definition of Done）
-
-**`postern-secrets` 同时满足上述 A~F 全部验收项——即 §3 全部功能可验产出、§5 全部接口签名与错误路径符合承诺、§4 全部禁止项经契约/依赖图/构造签名证实未做、§7 全部不变量由其标注的 Stele 契约/签名/文件协议强制、§6 全部相邻交互按约定方向·类型·时机·fail-closed 语义可验、全部关键失败路径解析为拒绝且不泄机密——时，视为本模块完成。** 凡标注「仅审查」的项（D7 解锁强度诚实、C1~C5/D9 的属主与无路径性中无法被现有契约/依赖图覆盖的部分、D3/F6 中诚实度边界的主观表述）须经人工审查通过，作为完成判定的补充条件。
+`postern-secrets` **算完成** ⟺ 一、二、三三组**每一条都通过**。任一条不过 = 不通过，必须修。F 类靠"接口存在 + 给定输入看产出是否符合通过判定"；L 类靠"触发某条件→行为恰为某可观察结果"（标注"行为观察"者按其确切输入/预期逐条命中，全中才过）；B 类靠"跑契约/`cargo tree`/clippy 看绿红"，其中 B-7/B-8 含结构检查与文档一致性的人工 checklist（拆成逐项 yes/no，全 yes 才过）。无法纯机器判定者（L-3 的 nonce 互异、L-6~L-12 的会话来源运行期物化与 ScrubSet 擦除行为、B-7 属主一致性结构检查、B-8 §5.2 解锁强度诚实表述）以"满足该确切条件即过"的二元形式判定，端到端另由 `postern verify` 第 8 项（响应脱敏探测 → 真实地址/凭据回显被擦除）与第 4 项（Scope 外资源代号 deny 且不泄露存在性，与代号↔真实地址匿名化一致）以及场景规格（`docs/examples/02 §4.2-E6`、`docs/examples/04 §4.1/§4.2`）挂点验证。
