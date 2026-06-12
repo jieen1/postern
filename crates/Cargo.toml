@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = [
+    "postern-core",
+    "postern-store",
+    "postern-secrets",
+    "postern-transports",
+    "postern-adapters",
+    "postern-daemon",
+    "postern-cli",
+]

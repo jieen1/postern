@@ -1,0 +1,15 @@
+[package]
+name = "postern-daemon"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+postern-core = { path = "../postern-core" }
+postern-store = { path = "../postern-store" }
+postern-secrets = { path = "../postern-secrets" }
+postern-transports = { path = "../postern-transports" }
+postern-adapters = { path = "../postern-adapters" }
+
+[[bin]]
+name = "posternd"
+path = "src/main.rs"

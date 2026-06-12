@@ -1,0 +1,11 @@
+[package]
+name = "postern-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+postern-core = { path = "../postern-core" }
+
+[[bin]]
+name = "postern"
+path = "src/main.rs"
