@@ -345,3 +345,87 @@ impl PageQuery {
 | **统一雪花 `IdGen` 是全工作区唯一 id 来源；时钟回拨拒绝生成** | 契约 `DB_UNIFIED_ID_GENERATOR`（封禁 uuid/ulid/nanoid 等替代 id 库）+ 反例自检 `DB_ID_GENERATOR_TEETH`；雪花 id JSON 序列化恒为字符串 |
 | **`PageQuery` 上限钳制**（全部集合查询的唯一形态，禁无界查询） | 契约 `DB_PAGINATION_MANDATORY`（`PageQuery::MAX_SIZE = 200`，`clamp` 钳制；store 集合查询必接收 `PageQuery`）+ 反例自检 `DB_PAGINATION_TEETH` |
 | **领域词汇与技术设计文档严格对齐** | 设计承诺（详细设计 8.1 必守不变量）；六动词集与正交语义、授权空间展开语义与技术设计第三部分一致 |
+
+---
+
+## 8. 验收标准
+
+> 本节是 `postern-core` 的**验收基准**：每条给出"输入 → 可观察结果"的明确判据与统一词汇标注的**验证方式**，逐条对应第 3 节功能（A）、第 5 节对外接口（B）、第 4 节边界（C）、第 7 节不变量（D）、第 6 节交互（E）、关键 fail-closed 路径（F）。`postern-core` 是零 IO 纯函数核，其全部集成测试均为**内存 Fake**驱动（无真实资源）。**说明**：第 7 节引用的 `DENY_RESPONSE_SCOPE_BOUNDED` 在现行 `agent-additions.stele` 24 条契约中**尚无对应 Stele 规则**，故相关条目以 `单元测试` + `场景规格` 验证、并标注为"靠审查/测试，无机器契约"。
+
+### A. 功能完整性（逐条对应 §3）
+
+| # | 功能（§3 出处） | 判据：输入 → 可观察结果 | 验证方式 |
+|---|---|---|---|
+| A1 | 领域类型词汇表（§3.1） | 构造 `NormalizedRequest`/`ClassifiedIntent`/`Decision`/`DenyResponse` 等类型；`ConnOrigin` 仅 `UnixPeer{uid,gid}`/`Tcp{remote}` 两态，无第三态；`DenyResponse` 序列化为 §5.1 约定的 JSON 字段集（`operator_note=None` 时整字段不出现） | `单元测试`（序列化/反序列化往返）；`构造签名审查`（枚举变体封闭） |
+| A2 | 授权空间展开纯语义（§3.1 授权结构 / §3 职责2） | 给定一组 `(Role × Scope)` 绑定与策略快照，`Principal` 展开为 `Resource × Capability × 细则` 判定空间：相同绑定 → 相同 `MatchedGrant` 集合；命中产出 `MatchedGrant`，未命中无格子 | `单元测试`（内存快照驱动，断言展开集合） |
+| A3 | 全部插件 trait 定义齐备（§3.2） | `Authenticator`/`Adapter`/`Transport`/`CredentialProvider`/`ConditionPredicate`/`AuditSink`/`Sanitizer`/`PolicyView` 八个 trait 的签名存在且与 §5.2 一致；可在 core 内用内存 Fake 实现编译通过 | `构造签名审查`；`集成测试（内存Fake）`（各 trait 可被 Fake 实现并注入 `Evaluator`） |
+| A4 | 纯函数求值 `evaluate`（§3.3） | 输入 `(req, ci, constraint, policy, now)` → 输出 `(Decision, EvalTrace)`；allow 路径产出 `Allow{grant, tier}` 且 tier 取自快照声明；`EvalTrace` 记录判定步骤与 `stage` | `单元测试`（内存驱动）；`场景规格 docs/examples/04 §4.1 Trace ①`（query·tier=ro 正常放行轨迹） |
+| A5 | tier 选择语义（§3.3 / §4 tier 归属） | allow 时按快照"动词→凭据等级"映射选定 `CredentialTier`；该动词**无匹配 tier 声明** → `Deny`（非 panic、非默认 tier） | `单元测试`（构造无匹配 tier 的快照，断言 `Deny`） |
+| A6 | 错误 → 拒绝阶段穷尽映射（§3.4） | 每个域错误枚举（`AuthError`/`ClassifyError`/`ConstraintError`/`PredicateError`/`TransportError`/`CredentialError`/`ExecError`/`DiscoverError`/`AuditError`）均有唯一 `stage` 映射，无遗漏、无 `_ =>` 兜底吞并 | `单元测试`（穷尽 match 覆盖每变体）；`构造签名审查`（无通配兜底） |
+| A7 | 统一 ID 与分页（§3.5） | `IdGen` 产出 41+10+12 bit 雪花、纪元 `2026-01-01T00:00:00Z`、JSON 恒为字符串、时钟回拨拒绝生成；`PageQuery::clamp` 把 `page_size>200` 钳制到 200、`page_no` 钳至 ≥1、不报错 | `单元测试`（位布局/回拨拒绝/钳制边界）；`Stele契约 DB_UNIFIED_ID_GENERATOR`；`Stele契约 DB_PAGINATION_MANDATORY` |
+
+### B. 对外接口契约（逐条对应 §5）
+
+| # | 接口（§5 出处） | 判据：语义符合承诺、错误路径正确 | 验证方式 |
+|---|---|---|---|
+| B1 | `Capability` 枚举（§5.1） | 恰含 `Observe/Query/Mutate/Execute/Manage/Destroy` 六变体，**无 `Admin`** | `Stele契约 SEC_ADMIN_NOT_GRANTABLE`（+ 反例自检 `SEC_ADMIN_NOT_GRANTABLE_TEETH`）；`构造签名审查` |
+| B2 | `DenyResponse` 序列化契约（§5.1） | `#[derive(Serialize)]`；`decision="deny"`；`operator_note` 带 `skip_serializing_if`；字段全部取自快照（无网关编造文本） | `单元测试`（序列化断言字段存在/缺省）；`场景规格 docs/examples/05 §4.2.D`（无预写则 `operator_note` 整字段不出现）；`场景规格 docs/examples/05 §4.2.E`（`request_hint` 机械生成/不可授予能力为 null） |
+| B3 | `Evaluator::evaluate` 签名稳定（§5.3） | 签名为 `evaluate(&self, req, ci, constraint, policy, now) -> (Decision, EvalTrace)`；`now` 显式入参、无隐式时钟；`&self` 不可变（无可变运行时状态） | `构造签名审查`；`单元测试`（同入参多次调用 `&self` 结果一致） |
+| B4 | 八插件 trait 签名稳定（§5.2） | 各 trait 方法签名与 §5.2 逐字一致，错误类型为对应 `*Error`；`Adapter::classify`/`check_constraint` 返回 `Result`（不返回裸 bool 默认放行） | `构造签名审查`；`集成测试（内存Fake）` |
+| B5 | 机密类型不透明声明（§5.2 末 / §5.1 `PresentedCredential`） | `ResolvedTarget`/`ResourceCredential`/`PresentedCredential` 不 derive `Clone`/`Serialize`、`Debug=REDACTED`、无 `Display`；core 内无其构造点 | `Stele契约 SEC_SECRET_TYPE_DISCIPLINE`（+ 反例自检 `SEC_SECRET_TYPE_DISCIPLINE_TEETH`）；`Stele契约 SEC_CONSTRUCTION_SITES`（+ `SEC_CONSTRUCTION_SITES_TEETH`） |
+| B6 | `PageQuery`/`Page<T>` 原语（§5.4） | `DEFAULT_SIZE=20`、`MAX_SIZE=200` 常量存在；`clamp` 幂等（`clamp(clamp(x))==clamp(x)`） | `单元测试`（常量与幂等断言）；`Stele契约 DB_PAGINATION_MANDATORY` |
+
+### C. 边界 / 禁止项（逐条对应 §4 "不做什么"）
+
+| # | 不做（§4 出处） | 判据：确实无该代码路径 | 验证方式 |
+|---|---|---|---|
+| C1 | 任何 IO 与副作用 / 不依赖工作区 IO crate | core 的 `Cargo.toml` 无 `postern-{store,secrets,transports,adapters,daemon}` 依赖、无 `rusqlite`/网络/文件 IO crate；依赖图无 `core →` 任何工作区 crate 边 | `Stele契约 ARCH_FORBIDDEN_EDGES`（+ 反例自检 `ARCH_FORBIDDEN_EDGES_TEETH`）；`cargo tree`（core 子树无 IO crate） |
+| C2 | 策略状态的任何变更（引擎对策略只读） | `evaluate` 仅接收 `&PolicySnapshot`，无任何快照写/重建路径；core 不暴露策略变更接口 | `构造签名审查`（`evaluate` 入参为 `&PolicySnapshot`，无 `&mut`） |
+| C3 | `ResolvedTarget`/`ResourceCredential` 的构造、ScrubSet 的构造与持有 | core 内不出现这两类机密类型的构造点；core 不定义/持有 ScrubSet | `Stele契约 SEC_CONSTRUCTION_SITES`（构造点仅限 `postern-secrets`）；`构造签名审查` |
+| C4 | 认证 / classify / check_constraint / execute / discover 的**实现** | core 仅有 `Authenticator`/`Adapter` 等 trait 定义，无任一方法的具体协议实现体 | `构造签名审查`（core 内仅 trait 定义、无 `impl ... for` 真实插件） |
+| C5 | `ConstraintCheck` 布尔事实的得出（跑 `Adapter::check_constraint`） | core 不调用 `Adapter::check_constraint`；`evaluate` 仅消费已物化的 `ConstraintCheck` 入参 | `构造签名审查`（`evaluate` 接收 `&ConstraintCheck`，core 内无 `check_constraint` 调用点） |
+| C6 | `ConnOrigin` 的采集 / 构造 | core 仅定义 `ConnOrigin` 类型、消费其值；构造权属外壳 listener | `Stele契约 SEC_CONSTRUCTION_SITES`（`ConnOrigin` 只能在 daemon shells 构造）；`构造签名审查` |
+| C7 | 决策的执行、出口脱敏的调用、审计事件的落地 | core 产出 `Decision` 但不翻译为执行/拒绝、不调用 `Sanitizer::scrub`/`scrub_stream`、不调用 `AuditSink::record`（审计落地与脱敏执行均归数据面内核/存储载体） | `构造签名审查`（core 内无 `Sanitizer`/`AuditSink` 调用点、无 `Decision` → 执行/拒绝的翻译路径） |
+| C8 | tier 解析、通路获取与治理、tier 连接隔离、单条通路建立与保活（§4 末"tier 选择归属"段 + §4 通路相关行） | core 仅在 `evaluate` 的 allow 路径产出 `Allow{tier}` 的纯语义判定；不调用 `CredentialProvider::credential_for`（(资源,tier)→凭据解析）、不调用 `Transport::open`（建连接）、core 内无连接池/通路生命周期/tier 隔离代码路径 | `构造签名审查`（core 内无 `credential_for`/`Transport::open` 调用点、无连接池或 tier 隔离逻辑）；`Stele契约 ARCH_FORBIDDEN_EDGES`（core 不依赖 secrets/transports，故无从触达解析与建连接） |
+
+### D. 必守不变量（逐条对应 §7，沿用 §7 已标强制手段）
+
+| # | 不变量（§7） | 判据 | 验证方式 |
+|---|---|---|---|
+| D1 | 零 IO、不依赖工作区任何 crate | 依赖图无 `core → {store,secrets,transports,adapters,daemon}` 边 | `Stele契约 ARCH_FORBIDDEN_EDGES`（+ `_TEETH`）；`cargo tree` |
+| D2 | `Capability` 无 `Admin` 变体 | `enum Capability` 体内无 `Admin` | `Stele契约 SEC_ADMIN_NOT_GRANTABLE`（+ `_TEETH`）；`postern verify 项7`（提权类操作模型层不存在该授权） |
+| D3 | 机密类型在本域不可构造、不可 Clone/Serialize | 同 B5/C3 | `Stele契约 SEC_SECRET_TYPE_DISCIPLINE`（+ `_TEETH`）；`Stele契约 SEC_CONSTRUCTION_SITES`（+ `_TEETH`） |
+| D4 | 求值路径禁吞错 | `core::eval` 路径无 `.ok()`/`.unwrap_or(true)`/`.unwrap_or_default()`/`.unwrap_or_else(\|..\| true)` 等吞错放行写法 | `Stele契约 EVAL_NO_ERROR_SWALLOWING`（+ 反例自检 `EVAL_NO_ERROR_SWALLOWING_TEETH`） |
+| D5 | `evaluate` 纯函数、确定性 | 固定 `(req, ci, constraint, policy, now)`，重复调用与跨进程调用 → **逐字节相同**的 `(Decision, EvalTrace)`；无随机、无隐式时钟、无可变状态 | `单元测试`（确定性回归：同输入多次断言相等）；`构造签名审查`（`&self` + `now` 显式入参，无 `thread_rng`/`Instant::now` 等）；**靠测试/审查，无机器契约** |
+| D6 | 一切 `Err` 解析为 `Deny` | 在 `evaluate` 内注入 Fake：`Authenticator::authenticate` 返回 `Err` → `Deny`；`ConditionPredicate::eval` 返回 `Err`/无法判定 → `Deny`；`ConstraintCheck{passed:false}` → `Deny`；穷尽各错误源 | `单元测试（内存Fake）`（逐错误源断言 `Deny`）；`Stele契约 EVAL_NO_ERROR_SWALLOWING`；`场景规格 docs/examples/04 §4.2.A`（SQL 伪装写归类拦截 → deny） |
+| D7 | `DenyResponse` 只含该 Principal 自身授权世界的事实 | 请求 Scope 外资源（真实存在但未授权 / 根本不存在）→ `your_grants` 只投影自身授权资源，`reason` 不泄露存在性；两类请求拒绝响应**不可区分** | `单元测试`（断言 `your_grants` 不含 Scope 外代号、两类请求响应等价）；`场景规格 docs/examples/05 §4.2.A`；`postern verify 项4`（Scope 外资源访问 deny 且不泄露存在性）；**§7 引用的 `DENY_RESPONSE_SCOPE_BOUNDED` 现无对应 Stele 规则，靠测试/场景** |
+| D8 | 统一雪花 `IdGen` 唯一来源、时钟回拨拒绝生成 | 同 A7 | `Stele契约 DB_UNIFIED_ID_GENERATOR`（+ 反例自检 `DB_ID_GENERATOR_TEETH`）；`单元测试`（回拨拒绝） |
+| D9 | `PageQuery` 上限钳制 | 同 B6 | `Stele契约 DB_PAGINATION_MANDATORY`（+ 反例自检 `DB_PAGINATION_TEETH`）；`单元测试`（钳制边界） |
+| D10 | 领域词汇与技术设计文档严格对齐 | 六动词集、正交语义、授权空间展开语义与技术设计第三部分一致 | `构造签名审查`（人工比对六动词与展开语义）；**设计承诺，靠审查，无机器契约** |
+
+### E. 与相邻模块交互（逐条对应 §6；方向恒为"相邻 crate → core"）
+
+| # | 交互（§6 出处） | 判据：方向 / 类型 / 时机 / 失败语义可验 | 验证方式 |
+|---|---|---|---|
+| E1 | ← daemon：`evaluate` 调用契约（§6.1） | daemon 以 `evaluate(req, ci, constraint, snapshot, now)` 调 core、收 `(Decision, EvalTrace)`；core 反向无对 daemon 的引用；步骤映射 `[1][3][5][6]` 在 `evaluate` 内，`[2][4]` 由 kernel 先行物化 | `Stele契约 ARCH_FORBIDDEN_EDGES`（无 `core → daemon` 边）；`集成测试（内存Fake）`（Fake 注册表驱动完整管线）；`构造签名审查` |
+| E2 | ← store：实现 `PolicyView`/`AuditSink`、消费 core 词汇（§6.2） | store 侧 Fake 实现 `PolicyView::snapshot -> Arc<PolicySnapshot>`、`AuditSink::record`，core 仅持 trait；`evaluate` 经 `&PolicySnapshot` 无锁读取 | `集成测试（内存Fake）`（Fake `PolicyView` 注入）；`构造签名审查`（trait 定义在 core） |
+| E3 | ← secrets：实现 `CredentialProvider`、引用机密声明（§6.3） | secrets 侧 Fake 实现 `credential_for(res, tier) -> ResourceCredential`，入参为 core 词汇；core 内不构造机密类型；`credential_for` 返回 `Err` → fail-closed deny（处置在连接层） | `Stele契约 SEC_CONSTRUCTION_SITES`/`SEC_SECRET_TYPE_DISCIPLINE`；`构造签名审查`（`CredentialProvider` 定义在 core、无构造点） |
+| E4 | ← transports：实现 `Transport`、消费注入的机密（§6.4） | transports 侧 Fake 实现 `open(target, cred) -> Channel`，机密生命周期不出 `open`；`open` 返回 `Err(TransportError)` → deny；`TransportError` 在 core 错误→阶段映射内 | `构造签名审查`（`Transport` 定义在 core）；`单元测试`（`TransportError` 映射到 deny 阶段） |
+| E5 | ← adapters：实现 `Adapter`、消费/产出 core 类型（§6.5） | adapters 侧 Fake 实现 `classify`/`check_constraint`/`execute`/`discover`，消费 `Intent` 产 `ClassifiedIntent`；`classify` `Err(ClassifyError)`→deny、`check_constraint` `false`/`Err`→deny；adapters 不可依赖 secrets/transports/store | `Stele契约 ARCH_FORBIDDEN_EDGES`（禁 `adapters → secrets/transports/store`）；`集成测试（内存Fake）`（Fake `Adapter` 物化 `ci`/`ConstraintCheck`）；`场景规格 docs/examples/04 §4.2.A` |
+| E6 | ← cli：仅消费 core 共享类型（§6.6） | cli 仅依赖 core 共享类型（`PageQuery`/`Page<T>`/`Decision`/`DenyResponse` + 雪花字符串约定）；cli 不依赖 store/secrets | `Stele契约 ARCH_FORBIDDEN_EDGES`（禁 `cli → store/secrets`）；`cargo tree`（cli 子树含 core、不含 store/secrets） |
+
+### F. 失败与边界行为（关键 fail-closed 路径，逐条可验）
+
+| # | fail-closed 路径 | 判据：触发 → 可观察结果 | 验证方式 |
+|---|---|---|---|
+| F1 | 认证失败 → deny | Fake `Authenticator::authenticate` 返回 `Err`（凭证无效/过期/吊销/可信域不符/来源不可判定）→ `evaluate` 产出 `Deny`，`EvalTrace.stage=auth` | `单元测试（内存Fake）`；`postern verify 项5`（已吊销/已过期凭证 → 认证层 deny） |
+| F2 | 归类不可靠 / 细则不满足 → deny | `ClassifyError`（kernel 短路）或 `ConstraintCheck{passed:false}` 传入 → `evaluate` 产出 `Deny`（白名单归类，宁可误拒） | `单元测试（内存Fake）`；`场景规格 docs/examples/04 §4.2.A`；`postern verify 项1`（伪装写经只读授权 → 归类/引擎层拒）；`postern verify 项2`（CTE 包裹 DELETE 经 mutate → 归 Destroy 拒） |
+| F3 | 条件谓词错误 / 无法判定 → deny | Fake `ConditionPredicate::eval` 返回 `Err` 或无法判定 → 视为不满足 → `Deny` | `单元测试（内存Fake）`；`Stele契约 EVAL_NO_ERROR_SWALLOWING` |
+| F4 | RBAC 未命中 / tier 无匹配 → deny | 请求资源/动词在快照无 `MatchedGrant`，或 allow 后动词无匹配 tier 声明 → `Deny`（非默认放行、非默认 tier） | `单元测试`（无命中/无 tier 快照断言 `Deny`） |
+| F5 | escalate 在审批关闭下 → 立即 deny | `Decision::Escalate{fallback}` 即取 `fallback`（恒 deny），不挂起、不等待 | `单元测试`；`场景规格 docs/examples/05 §4.2.C`；`postern verify 项9`（escalate 标注操作在审批关闭下立即 deny） |
+| F6 | Scope 外 / 不存在资源 → deny 且不泄露存在性 | 同 D7：两类请求拒绝响应不可区分 | `单元测试`；`场景规格 docs/examples/05 §4.2.A`；`postern verify 项4` |
+| F7 | 时钟回拨 → 拒绝生成 id | `IdGen` 检测到 `now < last_ts` → 拒绝生成（不产出可能重复 id） | `单元测试`（回拨场景断言拒绝）；`Stele契约 DB_UNIFIED_ID_GENERATOR` |
+
+### 完成定义（Definition of Done）
+
+`postern-core` 当且仅当**同时满足上列 A、B、C、D、E、F 全部验收项**——功能完整、对外接口签名与语义稳定、边界禁止项无对应代码路径、必守不变量经契约/测试/审查全部守住、与全部相邻 crate 的交互方向/类型/时机/失败语义可验、全部关键 fail-closed 路径经测试与 `postern verify` 确认——方视为该模块完成。

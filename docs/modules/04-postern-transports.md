@@ -177,3 +177,85 @@ pub trait Transport: Send + Sync {
 
 9. **`unsafe` 全 crate forbid**：本 crate 与全工作区一致 `unsafe_code = "forbid"`；`SO_PEERCRED` 不在本域（来源采集归外壳层），本域无已知 unsafe 需求。
    - 强制：`[workspace.lints]` `unsafe_code = "forbid"`（《详细设计文档》7.1）。
+
+---
+
+## 8. 验收标准
+
+> 本节是 `postern-transports` 的**验收基准**：每条给「输入 → 可观察的预期结果」判据 + **验证方式**（统一词汇）。维度 A 逐条对应 §3 功能、C 逐条对应 §4 边界、D 逐条对应 §7 不变量、E 逐条对应 §6 交互。能由契约/依赖图/构造签名/CI 门禁**机器验证**者优先标注；只能靠人工审查者在该条末尾标注 **[仅审查]**。
+
+### A. 功能完整性（对应 §3）
+
+| # | 功能（§3） | 输入 → 可观察的预期结果 | 验证方式 |
+|---|---|---|---|
+| A1 | 建立通路并暴露本地 socket（`open`） | 给定一次性注入的合法 `(ResolvedTarget, ResourceCredential)` → `open` 返回 `Ok(Channel)`，该 `Channel` 是对上层一致的「本地可用通路」，`target`/`cred` 在调用结束即被 move 释放（无副本残留） | `集成测试(内存Fake)`（以 Fake `ResolvedTarget`/`ResourceCredential` 与回环监听验证返回可用 `Channel`）；`场景规格 docs/examples/04 §4.1 Trace ① [7b]`（ssm 建到本地 socket 通路） |
+| A2 | 长连接型保活（`persistent()==true`） | 对长连接通路，在存活期间持续维持心跳/协议级续约（SSM 续期、SSH keepalive、租约续租）→ 连接管理层可安全复用同一条通路而不需重建；续约成功不改变 `Channel` 健康事实 | `单元测试`（保活计时器/续约触发逻辑）；`集成测试(内存Fake)`（注入「临近续约」时钟，断言续约被触发且通路保持「活」） |
+| A3 | 非长连接型即建即弃（`persistent()==false`） | 对非长连接通路 → 不承担跨请求保活；上层「用毕」关闭后通路即被释放，无后台保活残留 | `单元测试`（`persistent()` 返回值固定，且无保活路径被挂起） |
+| A4 | 健康事实上报 | 通路活/僵死/已断开 → `Channel` 健康查询如实返回对应事实，且事实**不含**真实地址/凭据/拓扑标识 | `单元测试`（健康态转换表）；`集成测试(内存Fake)`（断开底层后断言健康转「死亡」）；`构造签名审查`（健康事实类型不承载机密字段） |
+| A5 | 协议级关闭（优雅释放 / 强制 abort） | 连接管理层经 `Channel` 下达关闭指令 → 本域执行底层隧道的释放；下达强制 abort/cancel → 本域取消在途、关闭隧道，不等待优雅排空 | `集成测试(内存Fake)`（断言 abort 后底层隧道被取消、`Channel` 转「已关闭」）；`场景规格 docs/examples/06 §4.1 C`（freeze 切断在飞：在用连接强制 abort/cancel、关隧道，非优雅排空）、`场景规格 docs/examples/06 §4.2`（异常表第 6 行：冻结/吊销时在飞长操作被强制中断） |
+| A6 | 传输形态可扩展（feature 门控 `ssh`/`ssm`/`direct`） | 新增一种远端接入方式 = 新增一个 feature 门控的 `Transport` 实现 → 不触动连接管理/适配器/求值逻辑；各实现仅在 `kind()`/`persistent()` 取值与 `open` 内部机制上不同，对上呈现的 `Channel` 抽象一致 | `cargo hack check --each-feature`（每个 feature 单独可编译，≥`--no-default-features` 与 `--all-features` 两档，《详细设计文档》7.4 门禁 4）；`构造签名审查`（各实现共用 `core` 的 `Channel`，未引入形态相关的上层接口） |
+
+### B. 对外接口契约（对应 §5）
+
+| # | 接口（§5） | 判据：签名稳定 / 语义符合承诺 / 错误路径正确 | 验证方式 |
+|---|---|---|---|
+| B1 | `Transport::open(target, cred) -> Result<Channel, TransportError>` | `target`/`cred` 以**值**（move）传入，签名与《详细设计文档》4.1/8.7 一致；`open` 失败必返回 `Err`，**绝不**返回伪健康 `Channel` | `构造签名审查`（值传入 + 返回 `Result`）；`单元测试`（不可建场景断言 `Err`）；见 F1 |
+| B2 | `kind()` / `persistent()` | 返回值由各传输形态固定且稳定（同一实现多次调用恒等）；`persistent()` 是连接管理判定池化与否的**唯一**依据，长/非长差异不外溢到 `Channel` | `单元测试`（取值固定且幂等）；`构造签名审查`（`Channel` 接口不含长/非长分支）；对应 D7 |
+| B3 | `Channel` 健康/关闭语义（`core` 定义、本域承载） | 本域**不重新定义** `Channel` 类型，只在 `core` 声明的抽象上承载各形态的健康/关闭语义；`Adapter::execute(ch:&mut Channel,…)` 与本 trait 共享同一类型 | `构造签名审查`（本 crate 不声明 `Channel` 类型，仅 impl 其语义）；`集成测试(内存Fake)`（健康/关闭语义行为符合 §5.2 承诺） |
+| B4 | `TransportError`（每 crate 一个 thiserror 枚举） | 所有变体在**跨 crate 边界呈现前**已脱敏为不含真实地址/凭据明文的错误码；不实现 `Display` 回显原始错误串 | `单元测试`（构造含真实地址的底层错误，断言跨边界变体不含该地址子串）；`构造签名审查`（错误变体字段不承载机密类型）；红线 7.2-1，对应 D2 |
+
+### C. 边界 / 禁止项（对应 §4）
+
+> 判据为「确实没做 X / 无 X 的代码路径」。能由契约/依赖图/构造签名机器验证者优先标注。
+
+| # | 不做什么（§4） | 判据：可观察的「无此路径」 | 验证方式 |
+|---|---|---|---|
+| C1 | 绝不自行重建通路 | `Transport` trait 与本 crate 实现中**无任何重连/重建逻辑**；通路死亡仅经 `Channel` 健康语义上报「死亡」 | `构造签名审查`（trait 无重建接口）；`单元测试`（断开后通路停在「死亡」态，无后台重建尝试）；对应 D3 |
+| C2 | 不池化、不复用决策 | 本 crate **不暴露**池/复用/通路间治理设施；`open` 每次返回独立 `Channel`，本域不记录「这是新建还是复用」 | `构造签名审查`（无 pool/acquire/release 类公开接口）；对应 D4 |
+| C3 | 不做并发上限/背压/空闲回收/销毁发起 | 本域**无**并发上限、退避器、回收器、销毁发起方；仅执行连接管理发起的关闭 | `构造签名审查`（无上述设施的公开/内部主动路径）；对应 D4 |
+| C4 | 不保管/不自取凭据与真实地址 | 本域不持久持有、不缓存 `ResolvedTarget`/`ResourceCredential`，**无**从机密面主动取用的路径；机密只能由连接管理经 `open` 注入 | `Stele契约 SEC_SECRET_TYPE_DISCIPLINE`（机密类型不得 derive `Clone`/`Serialize`，类型层即无法复制留存）；`Stele契约 SEC_CONSTRUCTION_SITES`（机密只在 `postern-secrets` 构造，本域无构造路径）；依赖图（`secrets` 不在 `transports` 允许依赖边），见 E3 |
+| C5 | 不解释协议语义/不归类动词/不执行业务操作 | 本域不知道通路上跑 SQL/日志/HTTP；无 `classify`/动词归类/业务执行路径（归适配器，经 `Channel`） | `构造签名审查`（本 crate 无归类/业务执行接口）；依赖图（`adapters↛transports`，二者经 `core::Channel` 间接协作），见 E5 |
+| C6 | 不触策略与审计 | 本 crate **不依赖** `postern-store`，**无任何 SQL 字符串/rusqlite 依赖**，不读策略快照、不写审计事件 | `Stele契约 ARCH_FORBIDDEN_EDGES`（`transports↛store`）；`Stele契约 DB_NO_RAW_SQL_OUTSIDE_STORE`（裸 SQL 仅允许在 store）；`cargo tree`（依赖树无 `postern-store`/`rusqlite`），见 E4 |
+| C7 | 不做脱敏（不持有 ScrubSet、不擦字节） | 本域不持有 ScrubSet、不擦任何业务字节；唯一的「脱敏」是 §7-2 对 `TransportError` 自身的错误码脱敏（属机密类型纪律，非内容脱敏） | `构造签名审查`（本 crate 无 ScrubSet/Sanitizer 句柄、无内容擦除接口）；C6 已保证不依赖机密面 ScrubSet |
+| C8 | 不采集连接来源/不构造 `ConnOrigin` | 本域面向资源侧出站通路，不接受入站 Agent 连接；**无** `ConnOrigin` 构造路径 | `Stele契约 SEC_CONSTRUCTION_SITES`（`ConnOrigin` 只在 daemon shells listener 构造） |
+
+### D. 必守不变量（对应 §7，沿用 §7 已标的强制手段）
+
+| # | 不变量（§7） | 验证判据 | 验证方式（沿用 §7 强制手段） |
+|---|---|---|---|
+| D1 | 凭据/真实地址生命周期不出 `open` | `target`/`cred` move 传入、调用结束释放；类型层不可复制留存，无向上传递/落日志路径 | `构造签名审查`（`open` 值传入）；`Stele契约 SEC_SECRET_TYPE_DISCIPLINE`（不得 derive `Clone`/`Serialize`）；`场景规格 docs/examples/04 §4.1 Trace ① [7b]`（凭据引用即时释放） |
+| D2 | 机密类型 `Debug=REDACTED`、无 `Display`、不入日志 | 机密类型无法经 tracing 字段直接记录；`TransportError` 跨边界前已脱敏，`connection refused to <真实地址>` 一类串不外泄 | `Stele契约 SEC_SECRET_TYPE_DISCIPLINE`（类型纪律）；红线 7.2-1（跨边界先脱敏）；`单元测试`（错误变体不含真实地址子串）；`场景规格 docs/examples/04 §4.2 D`（连接不可建 deny 不含失败主机名）、`postern verify 项8`（响应脱敏探测：诱导回显连接串/IP → 经擦除） |
+| D3 | 绝不自行重建——断开如实上报、无静默重建 | 通路死亡只经 `Channel` 上报「死亡」；本域内部无「重连」逻辑 | `构造签名审查`（trait 无重建接口）；领域裁决（8.7）；`场景规格 docs/examples/04 §4.2 D`（不降级、不静默重试到其他通路）；对应 C1 |
+| D4 | 不池化、不做通路间生命周期决策 | 本域只管单条通路；池化/并发上限/回收/退避/销毁发起均不在本域 | `构造签名审查`（不暴露任何池/治理设施）；领域裁决（8.5 范围内 / 8.7 范围外）；对应 C2/C3 |
+| D5 | 不依赖 `store`/`secrets`，不自取机密 | 唯一允许的工作区依赖是 `core`；依赖树无 `store`/`secrets` | `Stele契约 ARCH_FORBIDDEN_EDGES`（`transports↛store`）；`Stele契约 SEC_CONSTRUCTION_SITES`（机密只在 secrets 构造）；`Stele契约 DB_NO_RAW_SQL_OUTSIDE_STORE`；`cargo tree`（无 `postern-store`/`postern-secrets`） |
+| D6 | `open` 失败必 `Err`，绝不返回伪健康通路 | 通路不可建立即返回 `Err(TransportError)`，由连接管理解析为 deny | `构造签名审查`（返回 `Result`）；`单元测试`（不可建场景断言 `Err` 且无 `Ok(Channel)` 路径）；公理二；见 F1 |
+| D7 | `Channel` 抽象一致、长/非长差异不外溢 | 无论底层形态/是否长连接，`Channel` 使用方式一致；长/非长差异仅由 `persistent()` 承载 | `构造签名审查`（`Channel` 接口无长/非长分支，`persistent()` 单一声明点）；`集成测试(内存Fake)`（ssh/ssm/direct 三形态对上呈现一致 `Channel` 用法） |
+| D8 | 健康事实如实、不含机密 | 健康事实只描述通路状态，不含真实地址/凭据/拓扑标识 | `构造签名审查`（健康事实类型字段不承载机密）；`单元测试`（健康事实序列无机密子串）；对应 A4 |
+| D9 | `unsafe` 全 crate forbid | 本 crate 无 `unsafe` 块，编译期被 forbid 拦截 | `[workspace.lints] unsafe_code = "forbid"`（构建期硬失败，《详细设计文档》7.1）；`cargo clippy --workspace --all-targets --all-features -- -D warnings`（门禁 3） |
+
+### E. 与相邻模块交互（对应 §6）
+
+> 判据为「按约定方向/类型/时机调用、失败语义为 fail-closed」。
+
+| # | 交互（§6） | 方向 / 类型 / 时机 / 失败语义判据 | 验证方式 |
+|---|---|---|---|
+| E1 | ← `daemon::connpool` 建立通路（§6.1） | **方向**：connpool→transports（本域只被调，绝不反向调 daemon）；**类型**：`open(ResolvedTarget, ResourceCredential)->Result<Channel,TransportError>`，move 注入；**时机**：求值管线**步骤 [7b]**；**失败**：`open` 失败返 `Err`，connpool fail-closed→deny | `集成测试(内存Fake)`（Fake connpool 注入句柄调 `open`，断言返回 `Channel`/`Err`）；依赖图（`transports` 无 `daemon` 依赖，无反向调用边）；`场景规格 docs/examples/04 §4.1 Trace ① [7b]`、`docs/examples/04 §4.2 D`（不可建→deny） |
+| E2 | → `daemon::connpool` 健康上报与按指令关闭（§6.2） | **方向**：信息流 transports→connpool，但本域经 `Channel`**被动呈现**事实、不主动调 daemon；**时机**：存活期间持续呈现健康、按 connpool 指令执行关闭/强制 abort；**失败**：通路死亡如实上报「死亡」、绝无静默重建；续约失败转「死亡」如实上报 | `集成测试(内存Fake)`（断言健康事实被动可读、abort 指令被执行）；`构造签名审查`（本 crate 无 `daemon` 依赖、无主动回调）；`场景规格 docs/examples/06 §4.1 C`、`场景规格 docs/examples/06 §4.2`（异常表第 6 行：在用连接强制 abort 并写 `connection_event`——`connection_event` 审计写在 connpool，非本域） |
+| E3 | → `postern-secrets`（禁止边，§6.3） | **方向**：**无**——本域不依赖机密面、不反向自取；机密由 connpool 从机密面取出后注入 `open` | 依赖图（`secrets` 不在 `transports` 允许依赖边内）；`Stele契约 SEC_CONSTRUCTION_SITES`（机密构造路径只在 secrets，本域不可 import）；`cargo tree`（无 `postern-secrets`） |
+| E4 | → `postern-store`（禁止边，§6.4） | **方向**：**无**，由契约显式禁止（`transports↛store`）；本域无 SQL 字符串与 rusqlite 依赖 | `Stele契约 ARCH_FORBIDDEN_EDGES`（`transports↛store`，含反例自检 `ARCH_FORBIDDEN_EDGES_TEETH`）；`Stele契约 DB_NO_RAW_SQL_OUTSIDE_STORE`；`cargo tree`（无 `postern-store`/`rusqlite`） |
+| E5 | → `postern-adapters`（无依赖边，经 `Channel` 间接协作，§6.5） | **方向**：无直接依赖（`adapters↛transports` 亦被禁）；二者经 `core::Channel` 间接协作——本域产出 `Channel`，适配器经 connpool 获得后 `execute`；**时机**：本域步骤 [7b] 建立，适配器步骤 [8] 执行；**失败**：适配器协议层错误沿适配器路径上报，通路死亡仍由本域经 `Channel` 上报 | 依赖图（`transports`/`adapters` 互不依赖，共用 `core::Channel`）；`构造签名审查`（`Channel` 类型在 `core`、被双方共享）；`场景规格 docs/examples/04 §4.1 Trace ①~③ [8]`（适配器在 `Channel` 上执行三类动词） |
+
+> 关于求值管线其余步骤（§6.6）：本域**只**参与 [7b] 与 [8] 期间的被动保活/健康呈现，[0]~[7a]、[9]、[10] 与本域无交互——属边界事实，由 C5~C8 与 D 维度共同保证「无此路径」，不另列验收条目。
+
+### F. 失败与边界行为（fail-closed）
+
+| # | 关键路径 | 触发 → 预期可观察结果 | 验证方式 |
+|---|---|---|---|
+| F1 | 通路不可建 → deny | 给定不可达/握手失败/会话通道开启失败的注入参数 → `open` 返回 `Err(TransportError)`（脱敏），**绝不**返回伪健康 `Channel`；connpool 据此 fail-closed→deny；本域不重试/不退避 | `单元测试`（各不可建因素均断言 `Err`）；`场景规格 docs/examples/04 §4.2 D`（连接不可建→deny，不降级、不静默重试）；公理二 |
+| F2 | 保活/续约失败 → 转「死亡」如实上报 | 长连接通路续约失败 → 通路健康转「死亡」如实呈现，**不掩盖、不自愈重连**；connpool 据此自行决策重建 | `集成测试(内存Fake)`（注入续约失败，断言健康转「死亡」且无重连尝试）；对应 D3/F1 |
+| F3 | 强制中断 → 砍断在飞，不优雅等待 | freeze/吊销时 connpool 下达强制 abort/cancel → 本域取消底层在途查询、关闭隧道，不等待优雅排空 | `集成测试(内存Fake)`（在「执行中」状态下达 abort，断言底层被取消、`Channel` 转「已关闭」）；`场景规格 docs/examples/06 §4.2`（异常表第 6 行：在飞长操作被强制中断，取消查询/关隧道，非优雅排空）；`场景规格 docs/examples/06 §4.1 C`（freeze 切断在飞） |
+| F4 | 跨边界错误不泄真实地址 | 底层错误含真实地址（如 `connection refused to 10.0.3.17`）→ 跨 crate 边界呈现的 `TransportError` 已脱敏为错误码，原始地址串不外泄 | `单元测试`（断言脱敏后变体不含真实地址子串）；红线 7.2-1；`postern verify 项8`（响应脱敏探测）；对应 D2 |
+
+### 完成定义（Definition of Done）
+
+`postern-transports` 当且仅当**同时满足上述 A、B、C、D、E、F 全部验收项**——功能完整（A）、对外接口签名稳定且错误路径正确（B）、所有禁止项确无代码路径（C）、九条不变量各由其标注的契约/签名/测试强制（D）、与每个相邻模块按约定方向/类型/时机交互且失败 fail-closed（E）、所有 fail-closed 关键路径逐条可验（F）——方视为该模块完成。
