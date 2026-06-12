@@ -50,6 +50,13 @@ SQL 文本 → sqlparser(PostgreSqlDialect) → Vec<Statement>
   └─ 对象提取：遍历 AST 收集 schema.table 与列     → 供细则校验与审计 objects
 ```
 
+**怎么做（遍历策略与对象提取）**：
+
+- **分级定档而非逐节点判定**：把"动词危险度"建模为一条全序——`Destroy(Delete/Drop/Truncate) > Mutate(Insert/Update/Merge) > Observe(Show/Explain非ANALYZE) > Query(纯只读)`。`classify` 对一条语句的归类 = 遍历整棵语句树所见全部写/观测节点取**最高危者**（一次自顶向下的 AST 走查累积一个"当前最高危档"，遇到更高危节点即提升、永不下调）。这把"是否降级"从需要逐分支推理的判断，收敛为"取最大值"这一不可被外壳包裹绕过的单调运算——这是 L-1/L-6 不降级在算法层的根因。
+- **遍历必须穿透只读外壳**：sqlparser 把 CTE（`Query.with`）、子查询（`SetExpr`/`TableFactor::Derived` 内嵌 `Query`）、`INSERT ... SELECT` 的源、`SELECT ... INTO` 的目标都建模为语句树的子节点；遍历**递归进入所有这些子树**，不在顶层 `Statement` 变体上止步。`WITH x AS (DELETE ... RETURNING *) SELECT ...` 顶层是 `Query`，但子树里的 `Statement::Delete` 被走查命中，最高危档被提升到 `Destroy`。判据是"语句树内是否**出现过**写节点"，与该写节点处于哪一层无关。
+- **白名单是"语句形态枚举"而非"危险动词黑名单"**：归类的入口是对顶层 `Statement` 变体做显式 `match`——只有落在 `Query`/`Insert`/`Update`/`Delete`/`Merge`/`Truncate`/`Drop`/`Show`/`Explain` 这组**已枚举形态**的语句才继续走查定档；`Set`/`DO`(`DECLARE`-less 匿名块)/`Copy`/`Call`/`Prepare`/`Deallocate` 等一切其余变体在 `match` 上即落入 `Err` 分支。**为什么用白名单而非黑名单**：黑名单要求穷举所有危险形态，漏一个即 fail-open；白名单只放行能可靠归档的少数形态，新语法默认落 `Err`（公理二），是 fail-closed 的唯一正确方向。
+- **对象提取与定档同遍历完成**：同一趟 AST 走查在累积最高危档的同时，收集所触达的 `schema.table`（`ObjectName` 规范化为 `ObjectRef`）与列名，去重后随 `ClassifiedIntent.objects` 返回。**为何同遍历**：对象集既供 §3.2 `table_allow`/`column_mask` 判定，又供内核审计消费（见 §3.x 可观测性），二者须看到与定档**完全一致**的对象视图，分两趟遍历会引入"判定看到的表与审计记录的表不一致"的漏洞。对象未能可靠提取（如动态拼接的对象名、`information_schema` 反射式引用）按不可靠归类处理，宁可 `Err`。
+
 定档原则与禁降级语义（与 4.4 严格一致）：
 
 - **按整棵语句树内最高危写节点定档，而非顶层语句类型**。危险动词在整棵树范围内可见，CTE 或子查询里的 `DELETE`/`DROP`/`TRUNCATE` 一律提升为 `Destroy`，**绝不因被只读外壳包裹而降级**（如 `WITH x AS (DELETE ...) SELECT ...` 仍判 `Destroy`，绝不降为 `Mutate` 或 `Query`）。
@@ -57,9 +64,13 @@ SQL 文本 → sqlparser(PostgreSqlDialect) → Vec<Statement>
 - **`EXPLAIN` 仅允许不带 `ANALYZE` 的形态归为 `Observe`**：`EXPLAIN ANALYZE` 会真实执行被解释语句，按其内部最高危写节点定档（含写节点即非 `Observe`）。
 - **白名单之外宁可误拒**（公理二）：归类是显式枚举的语句形态白名单，未知/歧义/多语句一律 `deny`；归类正确性的强制兜底是凭据分级（`Query` 恒走只读账号，引擎层拒绝一切写入，见 §3.3）。
 
-**docker_logs（容器日志，只读取数）**：`Intent` 为容器日志请求（容器选择 + 取数范围），恒归类为 `Observe`；其取数形态与远端探针/直连差异见 §3.4。
+**docker_logs（容器日志，只读取数）**：`Intent` 为容器日志请求（容器选择 + 取数范围），恒归类为 `Observe`；其取数形态与远端探针/直连差异见 §3.4 与详设 6.12。
+
+- **怎么做**：docker_logs 的 `Intent` 负载是一个**封闭枚举的取数请求**（容器选择符 + `since`/`tail`/`follow` 等只读取数参数），其形态本身**不含任何写表达**——没有"执行命令""重启容器"这类变体可被构造。因此 `classify` 不需要语法树遍历，只做"负载结构合法即归 `Observe`、否则 `Err`"的形态校验；`objects` 取容器选择符规范化后的 `container:<名>`。**为什么恒 Observe 不靠运行期判别**：只读性下沉到了 `Intent` schema 层（无写变体可表达）与远端只读端点/探针（见 §3.4），而非靠 `classify` 在运行期识别一条请求是否危险——这与 SQL 的"白名单形态"同源，都是把安全性建立在"危险无从表达"而非"危险被识别"上。
 
 **http（HTTP API）**：按声明的动词工具与路径将请求归类为相应 `Capability`；`engine_enforced=false`，归类 + 细则是唯一防线。
+
+- **怎么做**：HTTP 没有 SQL 那样的协议级语义可解析，`classify` 依据**该资源声明的动词工具映射**——即接入时为该 HTTP 资源声明的 `(MCP 动词工具 → 方法×路径形态)` 表，把进来的 `(method, path)` 反查到声明的 `Capability`。命中声明形态归相应动词，未落任何声明形态 → `Err`（白名单，未声明即不可归类）。**为什么 http 的归类必须更保守**：`engine_enforced=false` 意味着没有引擎账号兜底，一条被误归低危的写请求**不会**在下游被第二道防线拦下；故 http 的归类档位完全由声明决定、不做任何启发式推断（如"GET 即只读"这类假设在反代/RPC-over-GET 场景会 fail-open，禁止采用），`objects` 取规范化后的 `route:<path>` 供 `http_route` 细则与审计消费。
 
 ### 3.2 `check_constraint`：细则语义
 
@@ -83,6 +94,13 @@ SQL 文本 → sqlparser(PostgreSqlDialect) → Vec<Statement>
 | `route_allow` | rabbitmq | 发布/绑定的 routing key 必须落在 `spec` 白名单内 |
 | `mask_fields` | 任意（声明形态） | 声明需脱敏的列/字段名；**由内核出口的 `Sanitizer` 执行擦除**（适配器只定义声明形态，不执行脱敏，见 §4） |
 
+**怎么做（各 kind 判定的实现思路）**：`check_constraint` 是**纯函数**——只读 `spec` 与已物化的 `ci.objects`（§3.1 提取的对象集），不触底层资源、不发 IO（IO 上下文已在 `classify` 阶段消化进 `objects`，故本步可在 `evaluate` 前由内核先行物化为 `ConstraintCheck` 入参，见 §6.1/CONS-8）。各 kind 按"判定对象的提取方式"分两类：
+
+- **集合包含类**（`table_allow`/`http_route`/`container_prefix`/`key_prefix`/`command_class`/`vhost_allow`/`queue_prefix`/`route_allow`/`path_whitelist`）：从 `ci.objects` 取出该 kind 关心的对象维度（表集 / `(method,path)` / 容器名 / key / 命令类 / vhost / 队列 / routing key / 路径），逐一对照 `spec` 的白名单（精确集合或前缀集合）。判据是**全称量化**——请求触达的**每一个**对象都须落在白名单内，**任一**对象越界即 `Ok(false)`。为什么是全称而非存在量化：存在量化（"有一个命中即放行"）会让一条触达 N 张表的语句只要有 1 张在白名单就整体放行，是典型 fail-open。
+- **触达禁止类**（`column_mask` 在求值期的形态）：`spec` 声明的是**禁止触达**的敏感列集；判定是 `ci.objects` 列集与禁止集的交集**必须为空**，非空即 `Ok(false)`。它与 `mask_fields` 的差别是**生效阶段不同**——`column_mask` 在求值期拒绝**触达**（请求根本不许碰这些列），`mask_fields` 在出口期擦除**响应**（列可读但值被脱敏），二者非同一防线、不可相互替代。
+- **声明形态类**（`command_template`/`script_template`/`mask_fields`）：`check_constraint` 对 `command_template`/`script_template` 判"请求是否为某预声明模板的合法实例化"（模板外的自由命令一律不命中 → `Ok(false)`）；`mask_fields` 在本步**不参与求值期判定**（恒视作通过），它只是声明形态，真正的擦除由内核出口 `Sanitizer` 执行（见 §4）。
+- **判定所需信息缺失即 `Err`**：当 `ci.objects` 不足以判定（如某 kind 需要的对象维度在 `classify` 阶段未能可靠提取）时返回 `ConstraintError` 而非 `Ok(true)`——"判不了"必须等价于"不通过"，绝不放行（L-7）。
+
 合并语义遵循《详细设计文档》5.2"约束合并"：同 `kind` 多行默认取交集（全部须满足，fail-closed）；不同 `kind` 之间恒 `AND`；任一 `kind` 若采"白名单并集"语义须在其 `spec` 文档显式声明扩权特性（默认不取并集）。
 
 ### 3.3 能力声明与 `engine_enforced`
@@ -92,9 +110,20 @@ SQL 文本 → sqlparser(PostgreSqlDialect) → Vec<Statement>
 - **`engine_enforced = true`（SQL 类，如 postgres）**：存在**引擎级强制兜底**——`Decision::Allow{tier}` 选定的凭据等级在数据库引擎账号层受真实权限约束，即便 `classify` 把一条伪装写误归为 `Query`，它也只走只读账号、被引擎拒绝。归类是第一道线，引擎账号是强制兜底。
 - **`engine_enforced = false`（HTTP/容器类，如 http、docker_logs）**：不存在引擎级账号分级，**归类 + 细则是唯一防线**。此差异须在该 `Adapter` 的文档与 `engine_enforced()` 返回值中**如实标注**（公理三、6 节失败语义对齐）。
 
+**怎么做（为什么由适配器声明、声明为真凭什么成立）**：
+
+- **`engine_enforced()` 是编译期常量声明，不是运行期推断**：每个 `Adapter` 实现把自己协议是否具备"引擎级账号权限模型"硬编码为返回值——SQL 类返回 `true`、HTTP/容器类返回 `false`。**为什么由适配器声明而非内核统一判定**：是否存在引擎级账号分级是**协议固有事实**，只有该协议的解释者（适配器）知道；内核不解释协议、无从推断，故这条事实的属主只能是适配器（与 §3.6 Intent 负载、§3.2 细则语义同属"协议解释者唯一持有"）。
+- **`engine_enforced=true` 凭什么"真的"成立**：引擎兜底真实有效的前提是"tier 声明的动词集 ⊆ 底层账号真实权限"（详设 6.3）——这不是自动成立的，须经接入时校验取证。适配器在此的贡献是 §3.5 `discover` 探出账号的**真实权限**（如 `has_table_privilege`），供运维/`postern verify` 常规项比对"声明 `readonly` 的账号是否实测可写"。即：`engine_enforced=true` 是适配器的**声明**，其**为真的取证**由同一适配器的 `discover` 供给，二者合起来才让"伪装写恒被只读账号拦下"这条兜底落地。适配器本身**不选 tier、不感知 tier**（§4 边界），只声明"本协议存在兜底"这一布尔事实。
+
 ### 3.4 `execute`
 
 `async execute(ch, intent) -> Result<RawResponse, ExecError>`：在 `Channel` 上执行**已被求值放行**的 `Intent`，产出未脱敏 `RawResponse`（脱敏由内核出口完成，见 §4）。
+
+**怎么做（各 adapter 如何在 Channel 上执行）**：`Channel` 对适配器呈现为一个"本地可用通路"的字节抽象（见 §6.3），适配器在其上跑各自协议的客户端语义，**只见通路、不见传输种类/地址/凭据**：
+
+- **postgres（走 SQL）**：在 `Channel` 上以 PostgreSQL 线协议执行 `Intent` 携带的 SQL（经一个把 `Channel` 当作底层流的 pg 客户端）。执行前**绝不重新解析或改写**已放行的 SQL——`classify` 阶段的语法树只用于定档，执行用的是原文，避免"解析与执行看到不同语句"的二义。会话只读等语义已在**建连时**由连接管理层统一施加（见 §3.1 `SET` 一律拒绝、详设 6.3 归池前 `DISCARD ALL` 净化），适配器不在 `execute` 内补打 `SET`。结果集以未脱敏字节装入 `RawResponse`。
+- **docker_logs（走只读日志端点）**：把 `Intent` 的取数参数（容器选择 + `since`/`tail`/`follow`）翻译为对**只读日志端点**的请求，两种取数形态——①**直连**远端运行时已暴露的只读 API（安全前提是远端已自行限定该端点只读、可达性受控，网关不为远端越权暴露兜底）；②经**远端只读探针**取数（探针把"只读"下沉到远端进程边界，即便远端运行时能力更宽，探针只转发只读取数，最小暴露面、安全性更高，代价是需远端部署升级探针）。无论哪种形态，适配器对其的消费一致——经 `Channel` 发取数请求、收字节流；两种形态的安全取舍与部署差异详见详设 6.12。**只发取数、不发任何写/控制动作**：端点能力面在 `Intent` schema 与远端探针处即被限定为只读（探针能力面恒不含写动词），适配器侧无写路径可走。`follow` 形态产出的是**流式** `RawResponse`，由内核出口按流式模型脱敏（详设 6.4）。
+- **http（走转发）**：把 `Intent` 的 `(method, path, headers, body)` 经 `Channel` **转发**到目标 HTTP 端点，回传未脱敏的状态码/头/体。转发是**忠实搬运**——不在适配器侧改写请求语义（路径/方法已在 `classify`+`check_constraint` 处被白名单约束），凭据由连接管理层在建连边界注入、适配器不经手（`engine_enforced=false`，故归类+细则是该请求合法性的唯一保证，执行阶段不再有第二道判别）。
 
 - **只执行已放行意图**：`execute` 是管线步骤[8]，前置步骤[1]~[6] 求值放行、[7a] 意图审计、[7b] 取连接均已成立后才被调用（见 §6.1）。
 - **错误经脱敏后返回，已执行请求绝不返回 deny**：`ExecError` 沿出口经 `Sanitizer` 返回；对有副作用动词，一旦底层已落库副作用，绝不再返回 deny（《详细设计文档》6.1 时序不变量，由内核守护）。
@@ -104,6 +133,13 @@ SQL 文本 → sqlparser(PostgreSqlDialect) → Vec<Statement>
 
 `async discover(ch) -> Result<CapabilitySurface, DiscoverError>`：真实连上资源探测其能力面。
 
+**怎么做（如何探测能力面）**：`discover` 在递来的 `&mut Channel` 上**只发只读的元信息探测**，把资源的"客观能力事实"装进 `CapabilitySurface`，各 adapter 探测维度不同：
+
+- **postgres**：探测引擎版本、可见 schema/表清单、以及该接入账号的**真实权限**（如 `has_table_privilege`/默认权限）。后者尤为关键——它是详设 6.3"tier 声明权限 ⊆ 底层账号真实权限"这一前提的取证来源：一个声明 `readonly` 的账号若实测拥有写权限，运维据 `discover` 产出可见此缺口（`postern verify` 常规项据此报警）。
+- **docker_logs**：探测远端运行时/探针的协议版本与可达的只读端点，确认能力面恒为只读（探针 `protocol_version` 与网关协商，不兼容版本 → `DiscoverError`，详设 6.12）。
+- **http**：探测端点可达性与（若资源提供）声明式 API 描述，作为运维声明动词工具映射的事实底稿。
+- **产物是纯事实、零授权字段**：`CapabilitySurface` 只装"资源具备何种能力"，**绝不**含任何 allow/tier/grant 字段；授权化是人经控制面圈选的后续动作（发现≠授权）。探测失败（连不上、版本不兼容、权限不可读）一律 `DiscoverError`，绝不据失败结果或部分结果生成任何授权（fail-closed）。
+
 - **仅控制面可触发**（速查表"能力面发现 → 适配器执行，仅控制面可触发"）：经 `daemon::control` 的 `POST /v1/resources/{code}/discover` 进入，是接入侧探测，供运维圈选授权。
 - **发现≠授权**：`discover` 只产出**事实**（资源具备何种能力），绝不产生任何授权；授权化由人经控制面圈选。
 - **与数据面 `postern_surface` 严格区分**（CONS-20）：数据面 `postern_surface` 是授权快照的纯事实投影，**不触达底层资源、不调用 `Adapter::discover`**；二者命名边界由命名规范固化，禁止互相借用。
@@ -111,6 +147,47 @@ SQL 文本 → sqlparser(PostgreSqlDialect) → Vec<Statement>
 ### 3.6 Intent 负载格式
 
 本 crate 定义各协议 `Intent` 的结构，并定义 MCP 动词工具的参数 schema（`postern_query` / `postern_observe` / `postern_mutate` / `postern_execute` / `postern_manage` / `postern_destroy` 的 `request` 形态）。外壳层只把该负载**忠实装箱搬运、不增不减、不解释**（8.12 范围外）；解释权唯一归适配器。
+
+**怎么做（负载结构如何组织、为什么解释权唯一归适配器）**：
+
+- **每协议一套自洽的 `Intent` 负载类型，是 classify/check_constraint/execute 三方法的共同入参形态**：负载结构既要能被 `classify` 解读出动词与对象（如 postgres 负载携 SQL 原文、docker_logs 负载携容器选择符 + 只读取数参数、http 负载携 `(method, path, headers, body)`），又要能被 `execute` 直接在 `Channel` 上回放执行。**关键设计取舍**：`classify` 与 `execute` 看到的是**同一份原始负载**——`classify` 阶段产出的语法树/归类只用于定档，绝不改写负载；`execute` 用的仍是负载原文（见 §3.4 postgres"绝不重新解析或改写"），杜绝"解析时与执行时看到不同请求"的二义。
+- **负载须可序列化往返且逐字段稳定**（F-12 判定基准）：MCP 动词工具向 Agent 暴露的 `request` 即该负载的对外 schema，经外壳层装箱、跨进程搬运后须能无损反序列化回适配器——故负载类型的 schema 是适配器对外契约的一部分，序列化→反序列化往返后逐字段相等是其正确性底线。
+- **为什么解释权必须唯一归适配器**：外壳层只识别协议**形态**（语法层 4xx，8.12），不理解协议**语义**；内核做授权但不解释协议。一条 `Intent` 负载"是什么动词、碰哪些对象、该怎么在通路上执行"这组语义判断，全系于协议解释者。若把负载解释权分散到外壳或内核，会出现"同一负载在不同层被解读为不同意图"的裂缝（公理七要求外壳差异不引起安全语义差异）——故负载格式的**定义权**与**解释权**收敛到唯一属主适配器，是"协议唯一解释者"定位（§1）在数据结构层的落点。
+
+### 3.7 实现要点与工程约束
+
+本小节收口本 crate 的工程落地要点，是 §3.1~§3.6"做什么/怎么做"在并发、错误、性能、测试、可观测性层面的工程约束。与全局工程规范（《详细设计文档》7.x）一致处只一句话引用，不重抄。
+
+**并发与线程模型**
+
+- **`classify` / `check_constraint` 同步纯函数，`execute` / `discover` async**：前两者无 IO（`check_constraint` 在 `classify` 物化 `objects` 之后才跑、零 IO，故内核可在 `evaluate` 前先行物化为 `ConstraintCheck` 入参，保 `evaluate` 纯逻辑零 IO，CONS-8）；后两者在 `Channel` 上做协议 IO，跑在 tokio runtime 上、由内核 await。`Adapter: Send + Sync`——同一 `Adapter` 实例被多请求并发共享调用，故实现须**无内部可变共享态**（归类表/动词映射为不可变只读结构），并发安全由"无共享可变态 + `&self` 方法"而非锁达成。
+- **不持有连接、不做池化判定**：适配器经 `&mut Channel` 借用一条通路、用完即还，**不缓存 `Channel`、不跨请求复用**；连接的取/还/净化/弃用全在连接管理层（8.5），`execute`/`discover` 内不出现池化、退避、健康判定逻辑。会话副作用形态是否禁用复用由连接管理层决策，适配器只如实声明该形态（经协议语义），不参与判定。
+- **tokio 任务边界**：适配器本身**不 spawn 后台任务**（无独立 worker、无定时器）；流式 `execute`（如 docker_logs `follow`、HTTP 流式体）以 `RawResponse` 的流式形态把背压交还内核，由内核出口的有界缓冲/背压模型承接（详设 6.4），适配器不自建无界缓冲。
+
+**错误处理与传播**
+
+- **一个 `thiserror` 枚举，变体→拒绝阶段映射在 `core::error` 穷尽**：新增错误变体未写映射则无法编译（无 `_ =>` 通配兜底，详设 7.1；§5、L-15）。
+- **各方法的失败唯一表达是 `Err`，由内核翻译为 fail-closed**：`ClassifyError → deny`（步骤[2]，公理二）；`ConstraintError`/`Ok(false) → deny`（步骤[4]）；`ExecError → 经出口 Sanitizer 脱敏返回`，但有副作用动词一旦已落库副作用绝不再 deny（步骤[8]/[10] 时序不变量由内核守护，适配器经 `Err` 协同）；`DiscoverError → 接入侧拒绝/报缺口`（控制面，绝不据失败产授权）。
+- **绝不吞错放行**：求值相关路径禁 `.ok()`/`.unwrap_or(true)`/`.unwrap_or_default()` 等吞错放行写法（与内核 `EVAL_NO_ERROR_SWALLOWING` 协同，本 crate 经 clippy `-D warnings` 兜底，L-14/B-6）。
+- **panic 政策**：遵全局 7.1——`unsafe_code = forbid`，`unwrap_used`/`expect_used`/`panic`/`indexing_slicing`/`arithmetic_side_effects` 等 deny；万一仍 panic，由数据面外壳 CatchPanic 层转为脱敏 deny + `anomaly` 审计（适配器侧不靠 panic 表达失败，失败一律走 `Err`）。
+
+**性能与资源边界**
+
+- **`classify` 单趟 AST 遍历**：定档与对象提取共一趟自顶向下走查，复杂度与语句树节点数线性相关；对**解析产物规模设上界**（语句树节点数 / CTE 与子查询嵌套深度 / 对象集基数），超界按不可靠归类 `Err`——防御深度炸弹式 SQL 把 `classify` 拖成 DoS（公理二，宁可误拒）。
+- **`execute` 不持额外内存副本**：结果以流式/借用形态装入 `RawResponse`，大响应（容器日志、流式体）走流式不全量驻留内存；连接数/超时/并发上限由连接管理层统一施加（详设 6.3），适配器不自设池但其流式形态须能被上游有界缓冲背压。
+- **`check_constraint` 复杂度**：与 `objects` 基数 × `spec` 白名单规模相关的集合包含判定，均为有界小集合上的线性/对数匹配，无回溯式爆炸。
+
+**测试策略**
+
+- **`classify` 用内存语料集、无需真实资源**（纯函数收益）：维护一份"伪装攻击语料集"（写 CTE 包裹 / 子查询藏写 / 多语句 / 注释混淆 / `DO` 块 / `SET` 篡改 / `EXPLAIN ANALYZE` 写），**两层断言**——每条要么归其**真实最高危档**、要么 `Err`，**无一条降级为低危档放行**（详设 7.3；L-1/L-2/L-6；`postern verify` 项1/项2 的本 crate 前提）。`check_constraint` 同样以内存 `spec` + 物化 `ci` 驱动（白名单内/外、缺信息三类断言，L-7/L-8）。
+- **`execute` 两层断言的 postgres 容器集成测试**：在真实 PostgreSQL 容器上验证——①**功能层**：放行意图在 `Channel` 上正确执行并回未脱敏结果；②**安全层（引擎兜底取证）**：一条被误归 `Query` 的写若经只读账号执行，**被引擎拒绝**——印证 `engine_enforced=true` 的强制兜底是真实的、不是文档声明（详设 6.3、6.7 项1）。docker_logs/http 以只读端点/转发目标的轻量 Fake 或容器验证执行路径与流式脱敏交接。
+- **deny 路径"零调用"断言**：内核在 deny 短路时**不到达** `execute`，以"deny 路径下 `Adapter::execute` 调用计数==0、零副作用"判定（L-10）。
+
+**可观测性**
+
+- **适配器不落审计、不写运行日志记凭据/地址**：审计的落点与时序在内核（7a/10），适配器**不直接调 `AuditSink`**；它对可观测性的贡献是产出 `ClassifiedIntent.objects`（规范化的 `schema.table`/`route:<path>`/`container:<名>`）——这是内核审计 `denied.objects`/intent/outcome 事件**唯一**的对象事实来源，"对象供审计消费"即指此（§2 职责、§4 边界）。
+- **机密红线（详设 7.5）**：适配器侧本就拿不到真实地址/凭据（只见 `Channel`，§6.3）；`Intent` 原文（SQL 可含业务敏感数据）、任何错误串在跨边界前不得入运行日志、不得回显——`ExecError`/`ClassifyError` 经内核出口 `Sanitizer` 套统一安全文案信封后才外泄，绝不携带原始 intent 或底层串（如 `connection refused to 10.0.3.17` 一类，适配器侧拿不到、也绝不构造）。
+- **`engine_enforced()` 的诚实声明本身是一项可观测事实**：SQL 类返回 `true`、HTTP/容器类返回 `false`，且 `false` 者须在模块文档显式标注"归类+细则是唯一防线"（公理三；L-9 以返回值单元判定 + 文档标注串结构检查）。
 
 ---
 

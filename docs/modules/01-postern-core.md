@@ -46,21 +46,79 @@
 - **请求模型**：`NormalizedRequest`、`Intent`、`ClassifiedIntent`、`ConnOrigin`（仅 `UnixPeer{uid,gid}` / `Tcp{remote}` 两态）。
 - **决策模型**：`Decision`（`Allow{grant,tier}` / `Deny` / `Escalate{fallback}`）、`DenyResponse`（结构化拒绝响应）、`EvalTrace`（求值轨迹）。
 
+**建模要点（怎么做 + 为什么这样建类型）**：词汇表的实现是"把安全语义编码进类型形状，让违规在类型层不可表达"——而非仅声明一组 struct。几处非显然的建类型取舍：
+
+- **`Capability` 是封闭的正交六动词枚举、且无 `Admin` 变体**：六动词（`Observe/Query/Mutate/Execute/Manage/Destroy`）按"读/写/管/毁"的正交语义切分，授权格是 `Resource × Capability` 的笛卡尔判定空间，使"该 Principal 对该资源能做哪类动作"由格子存在性单点判定（§3.3 `[3]`）。**`Admin` 不进枚举**是把"admin 不可授予"（公理三）落到类型层：枚举里没有这个变体，"授予 admin"在 Rust 里根本写不出来（契约 `SEC_ADMIN_NOT_GRANTABLE`），而非靠运行期检查拦截。
+- **`ConnOrigin` 恰两态、且只取最小可信字段**：`UnixPeer` 只取 `{uid,gid}`、`Tcp` 只取 `remote`——**刻意不纳入 pid/exe 路径**，因 PID 可复用、`/proc` 读存在 TOCTOU 伪冒面，是可伪造特征；把不可信字段挡在类型之外，比"取进来再判断要不要信"更彻底（构造权仅属外壳 listener，§5.1）。
+- **机密族类型在词汇表里只有不透明声明**：`PresentedCredential`/`ResolvedTarget`/`ResourceCredential` 在 core 仅是声明（不可 Clone/Serialize、`Debug=REDACTED`、无 `Display`、core 内无构造点），词汇表给出"它们存在且如何被引用"，但实体的产生在 secrets/外壳（公理四的编译期表达，详见 §5.2/§7）。
+- **`Decision` 是三值而非布尔**：`Allow{grant,tier}`/`Deny`/`Escalate{fallback}` 把"放行还需带哪个授权格与凭据等级""拒绝带结构化响应""升级折叠为 fallback"三种结局编码进枚举，使下游不可能"只拿到 true/false 而丢失放行所需上下文或拒绝事实"。
+- **雪花 id 系列类型 JSON 恒序列化为字符串**：`PrincipalId` 等承载 64bit 雪花 id 的类型，序列化约定为字符串而非数字（避开 JS 53bit 精度丢失，详见 §3.5），这是词汇表对全系统 id 表达的统一约束、非各端各自决定。
+
 ### 3.2 全部插件 trait 的定义
 
 `Authenticator`、`Adapter`、`Transport`、`CredentialProvider`、`ConditionPredicate`、`AuditSink`、`Sanitizer`、`PolicyView`——**定义在 core，实现在各面 crate**（接口隔离点；与详细设计第四部分及附录 C 一一对应）。
+
+**为什么 trait 全部定义在 core（依赖反转，怎么做）**：这是 core 得以"零 IO、不依赖工作区任何 crate"却仍被全系统消费的**关键结构手段**——core 只声明"求值/执行需要哪些能力的形状"（trait 签名），把"如何用 IO 实现这些能力"全部下沉到各面 crate；`Evaluator` 与各运行期组件持有的是 `&dyn Trait`（或泛型约束），而非任何具体 IO 类型。由此**依赖边方向恒为"各面 crate → core"**（它们 `impl core::Trait`），绝无"core → IO crate"的反向边（契约 `ARCH_FORBIDDEN_EDGES`）。两条非显然的设计取舍：
+
+- **trait 上的 `Send + Sync` 是给实现方的约束、不是 core 的负担**：core 不 `spawn`、不 `await`，但因实现落在各 async 域、且要跨 tokio 任务共享，故 trait 在 core 处即标 `Send + Sync`（凭据/连接相关的 trait 还带 `#[async_trait]`）——这是"由 core 统一规定接口契约、各域照此实现"，把并发安全要求前移到接口定义处。
+- **机密相关 trait 的入参/出参用 core 的不透明声明类型**（`Transport::open` 收 `ResolvedTarget`/`ResourceCredential`、`CredentialProvider` 产 `ResourceCredential`）：core 只声明这些类型不可 Clone/Serialize、`Debug=REDACTED`，**不持有其构造权**（构造在 secrets，契约 `SEC_CONSTRUCTION_SITES`）。这使"trait 定义在 core"与"机密零接触"两个目标在类型层同时成立——接口形状在 core，机密实体永不流经 core。
+
+这一反转的直接收益是 §3.6 测试策略所述的"契约测试纯内存驱动"：任一 trait 都能被一个内存 Fake 实现并注入，求值/映射逻辑无需任何真实 IO 即可被完整驱动。
 
 ### 3.3 纯函数求值
 
 `Evaluator::evaluate(req, ci, constraint_check, policy, now)` —— 编排求值步骤 `[1][3][5][6]`，产出 `(Decision, EvalTrace)`；allow 时依快照 tier 声明完成动词→凭据等级选择；DenyResponse 的事实组装（reason / your_grants / request_hint / operator_note）全部取自快照。
 
+**内部编排时序（怎么做）**：`evaluate` 是一条**短路串行管线**——按 `[1]→[3]→[5]→[6]`（外加 allow 后的 tier 选择）顺序执行，**任一步判定拒绝即就地短路**，组装 `EvalTrace` 并以 `Deny` 返回，绝不继续往下跑。步骤之间不并行（条件谓词逐一求值、遇假即停，无需全跑），因为求值是 fail-closed 的"找到一个拒绝理由即足够"，并行既无收益又会模糊"在哪一步拒"的轨迹归因。各步落点：
+
+- **`[1]` 认证**：从注入 `Evaluator` 的 `Authenticator` 注册表按 `presented` 的 kind 选认证器，调 `authenticate(presented, origin, creds, now)` 得 `PrincipalId`；`now` 由 `evaluate` 透传，使凭证 `expires_at`/`revoked_at`/可信域时效在求值时刻按墙钟二次校验（不依赖 sweeper 时序）。`Err` → 短路 deny，`stage=auth`。
+- **`[3]` RBAC 展开查表**：以 `[1]` 得到的 `Principal` 在快照中展开 `(Role × Scope)`，查 `(req.resource, ci.capability)` 授权格是否存在。**`[2]` classify 的产物 `ci` 是入参**（kernel 先行物化），故 `evaluate` 直接消费 `ci.capability`/`ci.objects`，本步不调适配器。无命中格 → 短路 deny（公理一），`stage=rbac`。
+- **`[4]` 细则**：不在 `evaluate` 内执行——`ConstraintCheck` 已由 kernel 先跑 `Adapter::check_constraint` 物化为布尔事实入参（CONS-8）。`evaluate` 仅读 `constraint.passed`，`false` → 短路 deny，`stage=constraint`。这使 `evaluate` 零 IO、不持有 Adapter，契约测试可纯内存构造该入参。
+- **`[5]` 条件谓词**：取命中格附加的条件谓词清单，从 `ConditionPredicate` 注册表逐一 `eval(ctx, spec)`；`ctx` 由 `req`/`ci`/`now`/快照事实组装（含 mode、TTL、限流上下文等），全部来自入参与快照，无隐式来源。任一谓词返回 `false` 或 `Err`（无法判定）→ 视为不满足 → 短路 deny（公理二），`stage=condition`。
+- **`[6]` 动作分流 + tier 选择**：读命中格的动作标注。`allow` → 进入 **tier 选择**：在快照对该资源的 tier 声明中查"承载本次动词（`ci.capability`）的等级"，命中 → `Allow{grant, tier}`；**无任何 tier 承载该动词 → deny（不退默认 tier、不 panic）**，`stage=tier`。`escalate` → 直接折叠：审批关闭即取该格 fallback（恒 deny），不挂起、不在 core 内引入任何等待状态（审批挂起属控制面运行期，core 只表达"折叠为 deny"的纯语义）。
+
+**EvalTrace 如何累积**：`EvalTrace` 随管线推进**逐步追加**记录——每进入一步即登记"到达该步"，判定时登记"在该步、因何判定"（命中/未命中、谓词名与结论、tier 选择结果）。短路发生时轨迹截止于当前步，其最后一条 `stage` 即拒绝阶段，直接喂给审计 `stage` 字段与 `DenyResponse.reason` 组装。因 `evaluate` 全程确定性（输入相同→轨迹逐字相同），`EvalTrace` 是审计可对账（同一 `policy_rev` 下同一请求复算得同一轨迹）的载体。allow 路径的轨迹同样完整（记录"逐步皆通过 + 选定 tier"），供放行审计与解释。
+
+**DenyResponse 组装（为什么只取快照）**：`reason`/`your_grants`/`request_hint`/`operator_note` 全部从快照与轨迹机械取值、不编造（公理六）。`your_grants` 仅枚举该 `Principal` 自身 Scope 内授权的资源代号（受 `DENY_RESPONSE_SCOPE_BOUNDED` 约束）——这使"Scope 外但存在的资源"与"根本不存在的资源"两次拒绝**逐字节相同、不可区分**（防拓扑探测）：关键设计取舍是拒绝响应**绝不**回答"该资源是否存在"，只回答"你的授权世界里有什么"。`request_hint` 由策略对可授予能力机械生成 `postern elevate` 命令、对不可授予能力恒为 `null`；`operator_note` 仅当资源所有者预写才出现（缺省不序列化）。
+
 ### 3.4 错误 → 拒绝阶段映射
 
 各域错误枚举（`AuthError` / `ClassifyError` / `ConstraintError` / `PredicateError` / `TransportError` / `CredentialError` / `ExecError` / `DiscoverError` / `AuditError` …）及其到拒绝阶段（`stage`）的穷尽映射，供审计 `stage` 字段与拒绝响应组装使用。
 
+**穷尽 match 的组织方式（怎么做）**：映射以**逐变体显式分支**的 `match` 表达——每个错误枚举的每个变体对应一个拒绝 `stage`，**禁用 `_ =>` 通配兜底**。这是关键设计取舍：通配会让"新增一个错误变体却忘了归类"无声落进某个默认阶段，掩盖归因错误；去掉通配后，给某枚举加新变体而不补映射**直接编译失败**——把"映射完备性"从测试义务变成编译期义务（与详细设计 7.1 错误模型一致）。`stage` 取一个封闭的阶段枚举（对齐求值管线步骤命名：`auth`/`classify`/`rbac`/`constraint`/`condition`/`tier`/`transport`/`exec`/`audit`/`discover` 等），与 `EvalTrace` 截止步语义一一对应，使"轨迹截止步"与"错误归类"两条来源对同一次拒绝得到同一 `stage`。
+
+**为什么映射归 core**：错误枚举本身各域定义、实现各域，但"错误→阶段"的语义裁决是共享词汇表的一部分（拒绝阶段是全系统统一的审计维度），故穷尽映射的权威定义落 core，各域只产出错误、不各自决定阶段名——避免阶段命名在各 crate 漂移、审计 `stage` 字段失去跨域可对账性。映射是纯函数（错误值入、`stage` 出），无 IO、无副作用，与 `evaluate` 同属可纯内存驱动的判定逻辑。
+
 ### 3.5 统一 ID 与分页
 
 `IdGen`（雪花规格，时钟回拨拒绝生成）、`PageQuery`（含 `clamp` 上限钳制）、`Page<T>`（统一分页信封）。
+
+**IdGen 并发序列号生成（怎么做）**：位布局为 41 bit 毫秒时间戳（纪元 `2026-01-01T00:00:00Z`）+ 10 bit 节点号（config，默认 0）+ 12 bit 序列号。`IdGen` 持有"上次出号毫秒 + 该毫秒内序列计数"两项可变状态，对并发请求**串行化**取号：
+
+- **关键设计取舍——状态需互斥**：`IdGen` 是 core 内**唯一**持有可变状态的设施（与 `evaluate` 的无状态形成对照），多线程共用一个 `IdGen` 取号时该状态须互斥更新（短临界区的轻量串行化即可：读时钟、比较毫秒、推进序列、组装 id），保证同一毫秒内序列号严格递增、不漏不重。
+- **同毫秒序列推进与溢出**：同一毫秒内每出一号序列 +1；序列在 12 bit 内（单毫秒上限 4096 个）。**用满即等待下一毫秒**（自旋至墙钟跨入下一毫秒再从序列 0 重开），绝不在同毫秒内回绕复用——回绕会产出重复 id，违反"唯一来源"。跨毫秒时序列归零。
+- **时钟回拨处理思路（为什么拒绝而非容忍）**：取号读到的当前毫秒 **< 上次出号毫秒**即判定时钟回拨，**拒绝生成并返回错误**（fail-closed，公理二），绝不"取上次毫秒继续发"或"等回拨追平"。理由：回拨期间若沿用旧毫秒续发，会与回拨前已发 id 落在同一(毫秒,序列)空间而碰撞；而 id 是全工作区表主键与审计事件 id 的唯一来源，一个重复 id 即破坏主键唯一性与审计可对账性，代价远高于"短暂拒绝出号"。把回拨上抛由调用方（store/daemon）按 fail-closed 处置，core 不擅自补偿时钟。
+- **序列化约定**：雪花 id 为 64 bit，JSON 序列化**恒为字符串**（避开 JS 53 bit 精度丢失），反序列化亦按字符串解析。
+
+**PageQuery clamp 边界（怎么做）**：`clamp` 是把任意外来分页参数收敛进合法区间的**纯函数钳制**，不报错（取舍：超限钳到边界而非拒绝，使集合查询对"页大小填超"这类常见输入鲁棒、不把可恢复输入升级为失败）：
+
+- `page_no`：从 1 起，`< 1` 钳到 `1`（杜绝 0 或负页号导致后端 `OFFSET` 计算异常）。
+- `page_size`：钳进 `[1, MAX_SIZE]`，`MAX_SIZE = 200`、`DEFAULT_SIZE = 20`；`> 200` 钳到 `200`（封顶防无界查询，契约 `DB_PAGINATION_MANDATORY` 的语义前提），`< 1` 钳到合法下界。
+- **为什么钳制点在 core**：分页是全部集合查询的唯一形态，上限须有单一权威值；core 提供 `clamp` 后，store 后端在拼 `LIMIT ? OFFSET ?` 前统一过一次 `clamp`，使"页大小封顶"在全工作区只有一处定义、不被各调用方各自放宽。
+
+### 3.6 实现要点与工程约束
+
+本小节是上述功能落地时须共同遵守的横切约束。本 crate 的定位决定其工程画像与各 IO 域迥异：**纯类型 + 纯函数、零 IO、零工作区依赖**，故其约束以"确定性、可纯内存驱动、无任何副作用"为主轴；与全局工程规范（详细设计 7.x）重叠处一句话引用、不整段重抄。
+
+**并发 / 线程模型**：本 crate **纯同步、无 async、不触碰 tokio**——`evaluate` 与"错误→阶段"映射是无状态纯函数，可被任意线程并发调用、无需任何同步（无共享可变状态即无数据竞争）。`Evaluator` 的注册表（`Authenticator` / `ConditionPredicate`）在装配后只读，求值期不改。唯一持有可变状态的设施是 `IdGen`（出号计数 + 上次毫秒），其取号临界区须互斥串行化（见 §3.5），是 core 内唯一需要内部同步的点。trait 上的 `Send + Sync` 是给**实现方**的契约（实现落在各 async 域），core 本身不产生任务边界、不 `spawn`、不 `await`。
+
+**错误处理与传播**：错误模型遵循详细设计 7.1——每域一个 thiserror 枚举，core 维护"错误变体→拒绝阶段"的**穷尽 `match`、禁 `_ =>` 通配**（见 §3.4，新增变体不补映射即编译失败）。求值路径 fail-closed 是**被机器守护的不变量**而非仅代码规范：`core::eval` 路径禁 `.ok()` / `.unwrap_or(true)` / `.unwrap_or_default()` / `.unwrap_or_else(|_| true)` 等吞错放行写法（契约 `EVAL_NO_ERROR_SWALLOWING` + 反例自检）；一切 `Err`/无法判定**一律解析为 `Deny`**（公理二），由 `evaluate` 短路并在 `EvalTrace` 标注阶段。**panic 政策**：core 不依赖外壳的 `CatchPanic` 兜底，而是从源头消除 panic——lint 在 workspace 级 deny `unwrap_used`/`expect_used`/`panic`/`indexing_slicing`/`arithmetic_side_effects`（后者直接覆盖 `IdGen` 时间戳/序列运算与 TTL 比较的间接 panic 源），`unsafe_code = forbid`（机密类型的类型层保证以内存安全为前提）。`IdGen` 时钟回拨是 core 内唯一显式的 fail-closed 出错点（拒绝出号而非 panic、亦非续发）。
+
+**性能 / 资源边界**：`evaluate` 是关键路径，须**微秒级、零库访问**——它只在已物化入参（`ci`/`ConstraintCheck`）与内存快照上查表，不发起任何 IO、不阻塞。复杂度随命中格的条件谓词数线性、且遇假即短路；RBAC 展开与 tier 选择是快照内查表（快照已由 store 预先物化展开，core 不在求值期做继承展开计算）。core 自身无连接、无缓冲、无超时概念（这些属连接管理/传输/脱敏的运行期约束，见边界表）；唯一的有界量是 `IdGen` 单毫秒 4096 序列上限与 `PageQuery::MAX_SIZE=200` 的分页封顶。
+
+**测试策略**：core 零 IO 是测试的直接收益——**全部以纯内存 Fake 驱动，无需任何真实资源（无库、无容器、无网络）**。求值器测试以纯内存 `PolicySnapshot` 构造 + 内存假 `Authenticator`/`ConditionPredicate` 实现驱动，按 §8 的 F/L 用例方向覆盖：命中放行选 tier、未命中默认拒、各 `Err`/`false` 入参分别落到正确 `stage`、escalate 折叠、确定性（同输入多次/跨进程逐字相同）、拒绝响应 Scope 受限（两类不存在/越界资源不可区分）。`IdGen` 以可注入的 `now` 源测同毫秒递增唯一、序列溢出进位、时钟回拨拒绝出号；`PageQuery::clamp` 测三类边界（页号 `<1`、页大小 `<1` 与 `>200`）。运行期行为不变量（escalate 折叠、不可归类即拒、过期/吊销凭证拒、临时授权过期即不可见、无 tier 匹配即拒、拒绝响应 Scope 受限）以纯内存 `Evaluator` 数据驱动的 `(assert)` 值契约表达（详细设计 7.3-b），独立于 24 条静态结构契约。
+
+**可观测性**：core **无任何可观测性副作用——不记日志、不发指标、不写审计**（零 IO 的直接推论）。它的"可观测产物"是**返回值里的 `EvalTrace`**：求值轨迹（到达哪步、因何判定、`stage`、选定 tier）作为数据交回 kernel，由 kernel 决定落审计事件与运行日志（字段白名单见详细设计 7.5）。机密红线在 core 由**类型层**而非运行期纪律保证：机密族类型（`PresentedCredential` / `ResolvedTarget` / `ResourceCredential`）不可 Clone/Serialize、`Debug=REDACTED`、无 `Display`，在类型层即无法被 tracing 字段或序列化直接记录；core 内不出现其构造点。因此"不记凭据、不记真实地址"在本域不是约定而是编译期事实，`EvalTrace`/`DenyResponse` 只承载代号与策略事实、绝无机密。
 
 ---
 

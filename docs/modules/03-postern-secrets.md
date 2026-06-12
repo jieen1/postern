@@ -32,11 +32,66 @@
 
 - **保险箱解锁**：在启动序列中由选定的 `MasterKeySource::obtain()` 取得 32 字节主密钥，解开明文头中的包裹槽得到随机 data-key，再以 data-key 经 XChaCha20-Poly1305 解密 payload；明文头全段作为 AEAD 的 AAD 参与校验。`format_version` 不被当前实现识别时拒绝解锁（fail-closed）。
 - **凭据解析（按 (res,tier)）**：`CredentialProvider::credential_for(res, tier)` 返回 `ResourceCredential`——一个不可复制、不可序列化、`Debug=REDACTED` 的不透明持有，生命周期不出调用方的单次建立通路调用。
+  - **怎么做**：`credential_for` 内部按持久凭据形态分两类来源——**静态来源**（数据库密码、redis ACL 账号、API token：解锁后从 payload 直接物化出 `ResourceCredential`）与**会话来源**（账号密码/OAuth：有状态，需"登录一次→复用→续期"，见详细设计 6.13）。静态来源是纯查表物化，无运行期状态；会话来源经下述 live-session 路径。两者对外都收敛为同一不透明 `ResourceCredential`，调用方不感知其内部形态。
+  - **live-session 缓存（会话来源的核心数据结构）**：进程内一张以 `(ResourceCode, CredentialTier)` 为键的会话表，值含活跃会话/访问令牌（`Zeroizing` 持有）、`expiry`（硬过期墙钟）、以及"是否有在途续会话"的并发占位。整张表与其值都在 `Zeroizing` 容器、绝不落盘——短效会话只活在内存，长效持久凭据（账号密码/refresh token）才在 vault payload。`credential_for` 命中且 `now < expiry − skew` 时直接复用缓存（★不重登，对应 L-8）；缺失或临近过期则触发续会话，成功后回填缓存（账号密码档=用 vault 账号密码无人值守重登，OAuth 档=用 refresh token 换新 access token，对应 L-7）。续会话返回新长效凭据时（如 OAuth 轮换 refresh token）经控制面写路径事务性写回 vault（账号密码档无此步）。
+  - **续会话单飞（single-flight 并发控制）**：保证同一 `(res, tier)` 任一时刻**至多一个在途续会话**，杜绝并发建连引发登录/刷新风暴。实现要点——以该键上的一个共享"在途续会话占位"（一次性可等待句柄/`OnceCell`-类一次完成原语）作单飞门：首个发现需续的请求在持锁临界区内"占位 + 置入途标记"后即释放表锁去执行实际登录/刷新（**登录的网络等待不持表锁**，避免阻塞其他键的命中复用）；同期并发请求见占位即 `await` 该共享结果、复用同一续会话产物，不各自发起登录。续会话完成（成功或失败）原子地落值并清占位。**重叠窗口**：在 `expiry − skew` 主动续、旧会话在新会话就绪前仍有效，在用请求不中断（与凭证重叠期轮换同构）。
+  - **会话注入描述如何交给 http 适配器**：本域不直接被 adapters 依赖（`adapters↛secrets` 契约红线），会话物化产物以"请求注入描述"形态随 `ResourceCredential`/通路一并经连接管理层（`daemon::connpool`）流转——它声明该会话应以何种形态贴到转发请求上（Cookie / `Authorization: Bearer` / 自定义头 / 每请求回填 CSRF），由 http 适配器在 `Channel` 上消费执行。注入描述的**形态来自非敏感的 `auth_flow` 声明**（端点/字段/注入方式），其中承载的会话值仍是机密、`Debug=REDACTED`、不可被适配器读出明文，适配器只"贴上"不"读取"。
+  - **硬过期 fail-closed**：续会话不可建立（账号密码失效/refresh token 失效/系统强制每次 2FA 且无长效会话）→ 该请求返回 `CredentialError`、由 connpool 走 deny（步骤[7b]），`reason` 述"资源会话不可建立/已过期，需经控制面更新凭据"并附 `operator_note`；**绝不在数据面静默重试、绝不在运行期触发 2FA**（2FA 仅接入期、人在场，公理二）。错误路径不回吐账号明文（对应 L-10）。
 - **地址解析**：`resolve(code) -> ResolvedTarget`——把资源代号映射为真实地址的不透明持有，约束同 `ResourceCredential`。
+  - **怎么做**：纯查表，无运行期状态、无 IO——解锁后 payload 的 `targets` 段即一张 `代号 → {host/port 或 instance_id/region 等}` 的内存映射，`resolve` 据 `code` 取出并就地物化为不透明 `ResolvedTarget`（明文置于 `Zeroizing`，不复制、不出域）。未知 `code` 返回 `ResolveError`、无产物（fail-closed，签名层无"缺省地址"返回路径，对应 L-5 同构）。与 `credential_for` 静态来源同为命中即常数级的内存查表（见上文解析热路径）；二者的真实地址/凭据明文都只活在本域内存与 `Transport::open` 调用生命周期内。
 - **ScrubSet 句柄签发**：以单向 match-and-erase 句柄形式向内核签发系统级擦除集——句柄只能"匹配并擦除"，不可枚举、不可序列化，内容永不出现在任何输出路径。随保险箱写入更新。
+  - **句柄的构造（怎么从 vault 派生匹配视图）**：解锁后由 `targets`/`secrets` 全段派生一个**只进不出的匹配集**——`targets` 中全部真实地址字符串/IP、`secrets` 中全部凭据值，连同其常见编码形态（如 URL-encode、base64、连接串内嵌）与私网 IP 段模式、连接串模式一并纳入。匹配集封装在不透明句柄内部，对外只暴露 `scrub`/`scrub_stream` 入口（输入字节、输出已擦除字节），**不暴露任何枚举/读出匹配项的方法**——句柄持有者（daemon）即便有代码亦无法把集合内容读出（对应 L-12 与 §7-5）。明文匹配项与派生过程的中间态都在 `Zeroizing` 容器。设计取舍：选**多模式同时匹配的预编译结构**（如 Aho-Corasick 一类多串匹配）而非逐条线性扫描，使脱敏在出口热路径上对字节流单遍即可完成、复杂度随内容长度线性而非随匹配项数放大；句柄诚实度是**黑名单兜底**（不承诺识别全部编码变体），它是匿名化与凭据零接触之上的尽力而为层，不是绝对识别保证（§5.4 诚实度界定）。
+  - **句柄的更新时机（为何用原子替换而非原地改）**：句柄**签发于**启动序列解锁之后（随保险箱句柄一同交回 boot 装配）；**更新于**每次保险箱写入（录入/轮换/rekey）成功之后——本域据新 `targets`/`secrets` 重新派生一个**新版本句柄**，**原子替换**交付给内核（`Arc`-swap 式整体替换，而非对在用句柄原地增删）。取舍理由：内核出口可能正并发持旧句柄做 `scrub`，原地改会引入数据竞争与"擦一半"的窗口；整体原子替换让任一出口调用要么全用旧版本、要么全用新版本，无中间态。**红线**：句柄是 daemon 持有、本域签发与更新——脱敏的调用职责在内核，本域不执行脱敏调用，也不存在"未擦除直出"的放行分支（擦除是单向的，失败不会退化为放行）。
 - **机密录入/更新**：承接控制面对资源凭据与目标地址的写入（经 `vault://` 引用寻址），执行整体重加密的原子写入（写临时文件→`fsync`→原子 `rename` 覆盖，保留上一代 `.bak`），每次写入随机重生成 nonce，绝不复用。
 - **rekey / rotate-kdf**：重包裹 data-key 或更换 KDF 参数（仅作用于 passphrase 来源的包裹槽），不触动 payload 加密语义。
+  - **怎么做 + 为什么用"包裹槽 + data-key"两层结构**：payload 始终由随机 data-key 加密，主密钥只用来加解密明文头里包裹 data-key 的"包裹槽"。rekey/rotate-kdf 只在内存中解出 data-key、用新主密钥/新 KDF 参数重新包裹，**重写包裹槽而 payload 密文一字不动**（对应 F-9：同一 data-key 仍解原 payload）。取舍理由：这层间接让"换口令/换 KDF 参数"成为**只重写小尺寸明文头**的廉价操作，无需对可能很大的 payload 整体重加密；也使主密钥泄露后的处置（rekey）与凭据本身的轮换（重写 payload）解耦为两件独立的事。rotate-kdf 仅对 passphrase 来源有意义（其余来源直接持有 32B 主密钥、无 KDF 槽）。
 - **导出协调支持**：向控制面导出时只产出元数据与 `vault://` 引用，永不含明文。
+  - **怎么做**：导出由控制面发起（声明式导出归 8.10），本域只作机密侧的协调——按被导出资源的 `(code, tier-or-slot)` 生成对应 `vault://<code>/<tier-or-slot>` 引用字符串，连同**非敏感**的 `auth_flow` 声明（认证端点/字段/注入方式等已是 policy.db 中的非敏感配置）一并交还，**绝不对 `secrets`/`targets` 段做任何解引用**——payload 明文无任何路径流向导出产物（与回读只返掩码/引用同源，对应 §7-8 导出永不含明文、F-10）。设计取舍：导出可达性收敛为"只签发引用、不签发值"，使导出产物在结构上即不可能携带凭据/真实地址，而非靠出口逐字段过滤兜底。
+
+### 3.1 实现要点与工程约束
+
+本小节补述上列功能落地时的非功能性约束与跨切面工程要求；与全局工程规范（详细设计第七部分 7.1~7.6）一致处只引用，不整段重抄。
+
+**并发/线程模型**
+
+- 本 crate 自身**不拥有 tokio runtime、不 spawn 后台任务**；解锁、解析、录入写入都在调用方（`daemon::boot` / `daemon::connpool` / `daemon::control`）的任务上下文内执行。设计取舍：把任务边界留给唯一组装点 `postern-daemon`，本域只做"被调用的纯能力"，避免在库内私藏隐式后台线程（更易审计、无隐藏状态机）。
+- **解锁与录入写入是天然串行**：解锁在启动序列单次发生；录入/轮换/rekey 经控制面单写路径串行化（控制面写互斥，与 store "写入=事务+快照重建+审计"三联动同一临界区），整体重加密 + 原子写本就互斥，本域不需再持额外全局锁。
+- **运行期高并发点在 live-session 续会话**：唯一需要细粒度并发控制的是 `credential_for` 的会话来源——以 `(res,tier)` 为粒度的单飞门保证至多一个在途续会话（见上文凭据解析）。锁纪律两条红线：①登录/刷新的网络等待**不持表锁**（只在占位/落值的瞬间持锁），否则一个慢登录会拖垮其他键的命中复用；②单飞产物对并发等待者**共享而非各自复制**（`ResourceCredential` 不可 Clone，等待者复用同一会话物化结果而非克隆凭据）。
+- 会话来源涉及 `await`（对业务系统认证端点的网络调用），故 `CredentialProvider` 为 `async_trait`；静态来源虽无 IO 也统一 async 接口收敛，调用方无需区分。
+
+**错误处理与传播**
+
+- 每 crate 一个 thiserror 错误枚举（7.1 错误模型）：本域对外为 `UnlockError`/`CredentialError`/`ResolveError`（及写入错误），core 维护"错误变体→拒绝阶段"的穷尽 match。**全链路 fail-closed**：解锁失败/`format_version` 不识别/AAD 校验失败/payload 解密失败 → 不返回保险箱句柄、数据面不开放（L-1/L-2/L-6）；`(res,tier)` 无匹配/解析失败/库不可用/会话硬过期 → 返回 `Err`，由 connpool 据此 deny（步骤[7b]），**签名层即无"缺省凭据/缺省地址"返回路径**（L-5），错误绝不被吞为放行（契约 `EVAL_NO_ERROR_SWALLOWING` 作用于消费侧 `daemon::kernel`）。
+- **跨 crate 边界前强制脱敏**（红线 7.2-1）：本域抛出的任何错误在越过 crate 边界前先脱敏为不含真实地址/凭据/账号明文的错误码——绝不让 `connection refused to 10.0.3.17` 一类原始串外泄；与机密类型 `Debug=REDACTED` 纪律同源。
+- **panic 政策**（7.1）：lint 红线禁 `unwrap`/`expect`/`panic`/`indexing_slicing`/`arithmetic_side_effects`/`unsafe`（B-6）；万一仍 panic，由数据面外壳 CatchPanic 层兜底转脱敏 deny + `kind=anomaly` 审计——本域不依赖该兜底作正常控制流。
+
+**性能/资源边界**
+
+- **解锁**是启动期单次成本（一次 KDF + 一次 AEAD 解密），不在请求热路径。
+- **解析热路径**（`credential_for`/`resolve`）：缓存命中时为内存查表，常数级、无 IO；仅缺失/临近过期时才付出一次续会话网络往返，且经单飞收敛为每 `(res,tier)` 至多一次在途。
+- **脱敏热路径**：ScrubSet 句柄以预编译多模式匹配结构对出口字节流单遍扫描，复杂度随字节长度线性、不随匹配项数放大（见上文 ScrubSet 句柄构造）。
+- **内存边界**：明文机密只存活于解锁后进程内存与 `Transport::open` 调用生命周期；短效会话只在 live-session 缓存、不落盘，缓存随会话硬过期与续会话回填自然收敛，无无界增长。
+
+**内存纪律（Zeroizing）**
+
+- 主密钥、data-key、payload 解密产物、`ResolvedTarget`/`ResourceCredential` 内层明文、live-session 会话值、ScrubSet 匹配集中间态——一切明文一律置于 `Zeroizing` 容器，离开作用域即清零（7.1 机密类型纪律）。配合机密类型不 derive `Clone`/`Serialize`、`Debug=REDACTED`、无 `Display`（契约 `SEC_SECRET_TYPE_DISCIPLINE`），使其在类型层即无法被 tracing/日志直接记录、无法被复制到多处而漏清零。
+
+**加密库选型**
+
+- KDF：`argon2`（argon2id，**仅作用于 passphrase 来源**的包裹槽派生，其余来源直接持有 32B 主密钥）；AEAD：`chacha20poly1305`（XChaCha20-Poly1305，24B nonce 使随机生成在 nonce 空间内安全、无需计数器，L-3）；清零：`zeroize`（`Zeroizing` 容器纪律）。nonce 取值源恒为 CSPRNG，源码无固定常量/计数器递增的 nonce 路径（L-3 结构检查）。供应链经 `cargo deny` 门禁（7.4），这三类加密原语库的选型与版本纳入审查。
+
+**测试策略**
+
+- **不依赖真实业务系统/真实 OS 钥匙串**：解锁/格式/原子写以**临时 vault 文件**驱动——构造合法 vault + 正确主密钥验解锁成功，逐字节篡改明文头/置错 data-key/设不识别 `format_version` 验各 fail-closed 分支（F-1/L-1/L-2）；原子写在"临时文件写到一半/`rename` 前"注入中断，验原 vault 完好、`.bak` 可回退（L-4）；连续 N 次写采样 nonce 验两两互异（L-3）。
+- **`MasterKeySource` 用 Fake 实现**：以返回固定/可控 32B 主密钥的 Fake 来源驱动解锁路径测试，无需真实钥匙串/systemd/TPM；四来源各自的真实强度差异是文档一致性 checklist（B-8）而非运行期测试。
+- **会话来源用内存 Fake + Fake 时钟**：以 Fake 认证端点（可编排"登录成功/失败/返回新长效凭据"）+ **Fake 时钟**（可推进到 `expiry−skew` 与硬过期）覆盖——命中复用不重登（L-8）、临近过期无人值守续会话（L-7）、并发触发验单飞至多一次在途登录（L-9）、续会话失败验 deny + `operator_note` 且不泄账号（L-10）。续期判定用注入时钟而非真实墙钟，使测试确定、可复现。
+- 单元测试与被测代码同文件 `#[cfg(test)]`，测试代码经 `cfg_attr` 豁免 `unwrap`/`expect`/`panic` 前三项 lint（7.3）。
+
+**可观测性**
+
+- 本域**不直接写审计载体**（审计落地经控制面/内核，本域只经手机密）；与本域相关的审计事件是 `credential_event`（接入引导、每次续会话重登/刷新、续会话失败），由控制面/连接管理层在其路径上落地。
+- **机密红线**（7.5 内容红线）：`credential_event` 与一切运行日志只记**标识不记值**——只记"哪个 `resource`/`tier`/会话发生了什么"（如续会话成功/失败、硬过期），**绝不记账号、密码、令牌值、真实地址**；机密类型已纳入机密类型纪律，在类型层即无法被 tracing 字段直接记录。
+- 运行日志字段限白名单（`resource` 恒为代号、`capability`、`stage`、`decision` 等，7.5），`Intent` 原文/凭据/vault payload/`secret_ref` 解引用结果一律禁入日志。
 
 ---
 

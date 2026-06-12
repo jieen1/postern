@@ -56,6 +56,11 @@ src/
 5. **开放数据面**：先创建 `control.sock`（`0600`），再创建 `data.sock`（`0660` 或专用组）并挂载数据面 router——数据面最后开放，确保策略、机密、连接均已就绪。
 6. **`data.sock` 可连 uid 自检（硬前置条件 ②）**：检查 `data.sock` 的可连 uid 集合；若该集合包含 daemon 自身 uid（Agent 与 daemon 同 uid），**fail-closed 拒绝启动**（或在明知风险的形态下强制告警），杜绝"同 uid 还能跑"的静默不安全状态。该项纳入 `postern verify` 红队项。
 
+**怎么做 — 依赖顺序即安全顺序**：上述六步是一条**单线程顺序启动链**，顺序本身是安全不变量而非便利。每步产出下一步的输入：开库产出 `Connection` 与 schema 版本判定 → 重建快照需要已迁移的库 → 解锁保险箱在快照之后（机密面据 `targets`/`secrets` 构造 ScrubSet，与策略状态无依赖但须在数据面开放前就绪）→ 注册插件把 trait 对象装入注册表（注册表是内核与连接管理构造的入参）→ 最后才**开放数据面**。设计取舍：**数据面 socket 必须最后创建**——若提前 bind `data.sock`，则在快照/保险箱/连接池任一未就绪的窗口内，落到 handler 的请求会撞上半装配状态，fail-closed 在此退化为"先开门再装锁"。因此 boot 把"创建 `data.sock` 并 `serve`"作为整链的**唯一收尾动作**，此前任一步返回 `Err` 都在 socket 创建前短路（进程非零退出、`data.sock` 不存在），对外表现为"要么完整可用、要么根本不接客"。
+- **socket 创建次序**：先 `control.sock`（`0600`）后 `data.sock`，二者各自 `bind` 后**立即 `chmod`/设属组再 `listen`**，消除"默认 umask 下短暂可连"的竞态窗口。
+- **可连 uid 自检的判定形态**：自检是对"`data.sock` 在当前 umask/属组/ACL 下哪些 uid 能 `connect`"的有效集合判定，**不是**读请求自报——它在 socket 创建后、`serve` 前执行，集合含自身 uid 即在开放前 fail-closed。
+- **首份快照的语义**：boot 通过 `PolicyRepo` 在一次事务内物化首份 `Arc<PolicySnapshot>`，此后数据面只经 `PolicyView::snapshot` 消费只读投影；`PolicyRepo` 句柄随即只交给 `control`/`sweeper`，**绝不进入数据面 router 的注入集合**（红线 7.2-2 在装配处即落地）。
+
 ### 3.2 kernel — 数据面请求内核
 
 对每个外壳提交的 `NormalizedRequest`，按管线 [0]→[10] 串到底并逐步短路（管线步骤与失败语义见第六部分 6.1）：
@@ -67,6 +72,11 @@ src/
 - **出口统一脱敏的调用职责**：内核是 Sanitizer 的**唯一调用点**——正常响应、错误信息、拒绝响应、审计事件正文，一切离开内核的字节都经 `sanitize/` 模块过同一 Sanitizer，再交外壳格式化。
 - **CatchPanic**：数据面 router 挂 CatchPanic 层，任何 panic 一律转为脱敏后的 deny 响应 + 一条 `kind=anomaly` 审计，绝不让 panic 成为不留痕的失败路径。
 
+**怎么做 — 管线编排的数据流与短路形态**：内核把 [0]→[10] 实现为一条**线性短路链**，每步要么产出下一步入参、要么以确定 `stage` 的 `DenyResponse` 提前返回。关键数据沿链单向流动：`NormalizedRequest`（含出示物、`ConnOrigin`、资源代号、原始 Intent）→ `classify` 得 `ClassifiedIntent` →（先行）`check_constraint` 得 `ConstraintCheck` → `evaluate(req, ci, constraint_check, snapshot, now)` 得 `(Decision, EvalTrace)` → `Allow{tier}` 时 `acquire(resource, tier)` 得 `Channel` → `execute(&mut ch, intent)` 得 `RawResponse` → `scrub` → 审计。短路用 Rust 的 `?`/early-return 表达，**每个失败分支都显式带上该步的 `stage`**（auth/classify/rbac/constraint/condition/connect），杜绝"统一兜底 deny 但丢失 stage"——`stage` 是 deny 审计可还原"卡在哪一步"的承重字段（公理六）。
+- **为何 [4] 细则先行（CONS-8 的工程理由）**：`check_constraint` 是适配器的 IO/语义判断（可能要解析 SQL 语法树），若把它放进 `evaluate` 内部，`evaluate` 就不再是 core 的零 IO 纯函数、无法用纯内存快照单测。故内核把这步**外提**到 `evaluate` 之前跑完，只把布尔化的 `ConstraintCheck` 作为**已物化结果**传入——`evaluate` 据此 deny 与 kernel 直接短路 deny 二者语义等价，取后者更早短路、省一次求值。
+- **两阶段审计如何编排（intent 先于 execute 的时序锁）**：动词的副作用性决定审计编排形态。只读动词（observe/query）走"执行后单次"：先 `execute` 再 `scrub` 再单次 `record`，`record` 失败按 deny 返回（此时尚无对外暴露的已落库副作用，deny 诚实且安全）。有副作用动词（mutate/execute/manage/destroy）走**两阶段**：[7a] 先以同一 `request_id` 落 **intent** 事件，**intent 写不进则在 `execute` 之前 deny**（确未执行）；[7b]/[8] 执行后 [10] 落 **outcome** 事件，`outcome` 写失败时返回"已执行但审计降级"的可识别错误码、**绝不返回 deny**。设计取舍：这里刻意把"intent 必须先落盘成功"作为执行的**硬门**——宁可在确未执行时 deny（可重试且安全），也不容许"已执行却无痕"或"已执行却谎报 deny 诱导重试导致重复执行"（违公理六）。intent 与 outcome 由同一 `request_id` 关联，供事后对账"发起即有痕、结果可追溯"。
+- **出口统一脱敏的单点如何成立**：内核把"离开内核的字节"收敛到**唯一一处** `sanitize` 调用——正常 `RawResponse`、`execute` 错误、各 `stage` 的 `DenyResponse`、审计事件正文，在交还外壳格式化**之前**都流经 `sanitize/`。实现上以"内核出口函数是唯一返回点"保证穷尽性：handler 不在内核内部各分支各自 format-and-return，而是各分支汇聚到出口、统一过 `scrub`/`scrub_stream` 再套 `{error:{code,message}}` 信封。外壳层语法 4xx 与 CatchPanic 响应体同样回灌这一出口，杜绝绕过路径（红线 7.2-3）。
+
 ### 3.3 shells/http + shells/mcp — 数据面外壳（服务端）
 
 - **HTTP 外壳**：axum router 挂 `data.sock`；解析协议形态、不合法形态返回经同一 Sanitizer 的外壳层 4xx（常量安全文案）；构造 `NormalizedRequest` 提交内核。
@@ -74,12 +84,22 @@ src/
 - **`postern_surface`（CONS-20）**：返回该 Principal Scope 内**已授权能力面**——授权快照的投影，**禁止触达 `Adapter::discover`**、不触达任何底层资源。这与控制面接入侧的 `discover` 是两个术语，命名规范固化其边界、禁止互借。
 - **ConnOrigin 仅 listener 构造**：`ConnOrigin`（`UnixPeer{uid,gid}` / `Tcp{remote}`）只能由本模块 listener 层构造，绝不采信请求自报字段（契约 `SEC_CONSTRUCTION_SITES`）。
 
+**怎么做 — UDS 上挂 axum 与请求装箱**：数据面 router 是一个绑在 `data.sock`（`UnixListener`）上的 axum `Router`，经 tower 的 `serve_connection` 形态接受连接；**HTTP 与 MCP 两个 router 共挂同一 `data.sock`**（MCP 占 `/mcp` 子路径、HTTP 占其余动词端点），二者注入集合相同、出口同一 `submit`。装箱（[0]）是外壳唯一的语义动作：listener 接受连接的瞬间，由 listener 层经 `SO_PEERCRED`（`tokio UnixStream::peer_cred`）取 `(uid,gid)` 构造 `ConnOrigin::UnixPeer`——**这是 `ConnOrigin` 的唯一构造点**，请求体里任何自报来源字段一律不读（契约 `SEC_CONSTRUCTION_SITES`）。随后外壳把"出示物 + `ConnOrigin` + 资源代号 + 原始 Intent 负载"组装为 `NormalizedRequest` 提交 `submit`。设计取舍：装箱**只搬运不解释**——原始 Intent 原封传递给适配器的 `classify`，外壳绝不预解析 SQL/协议语义，确保 HTTP 与 MCP 经 [0] 后内核所见请求逐字段等价（公理七）。
+- **不合法形态的 4xx**：协议语法层不合法（解析失败、缺字段）由外壳直接返回 4xx，但**仍过同一 Sanitizer** 输出常量安全文案——语法判断不是安全决策，不进管线，但其响应字节同样不许绕过出口。
+- **MCP 工具面为何固定**：`rmcp` streamable-http 暴露的工具集是**编译期固定的动词工具**，不随某 Principal 的授权动态增删——动态增删会把"有哪些工具"变成授权事实的侧信道（泄露 Scope 边界）。工具描述只含协议事实，授权判定一律延后到管线内。
+- **`postern_surface` 为何不碰 discover**：`postern_surface` 直接读**当前 `Arc<PolicySnapshot>` 的已授权投影**返回，路径上**没有 `Adapter::discover` 调用、不触底层资源**——它回答"我已被授权能看到什么"，是快照内存查表；控制面 `discover` 回答"这资源实际有什么能力"，要真实连库探测。命名规范固化二者边界、禁止互借，杜绝把接入侧探测误接到数据面成为发现即授权。
+
 ### 3.4 control — 控制面 API + 系统自动机
 
 - **全部端点**（见 6.5）：principals / credentials（签发/吊销/轮换/可信域）/ roles / bindings / resources（含 `POST /v1/resources/{code}/discover` 触发接入侧探测）/ constraints / conditions / deny-notes / settings / grants/temp（elevate/revoke）/ mode / grants 视图 / audit 查询 / denials/summary / **approvals（审批挂起队列查询与裁决）** / export / import / verify / health / shutdown。
 - **写入三联动**：每个写端点 = 一次事务 + 快照重建 + 审计事件；全部集合端点强制分页（`page_no/page_size`，缺省 20，钳制上限 200，`Page<T>` 信封，分页在 SQL/扫描层执行）；雪花 id 一律字符串序列化。
 - **乐观锁端到端**：读端点统一返回 `version`，更新/删除端点必须携带期望 `version`，不匹配返回 `409 Conflict` 并写 `policy_change` 审计；系统协调写不走乐观锁。
 - **系统自动机**：sweeper 回收、import/apply 协调以 `actor=system`（`created_by/updated_by=system`）走同一事务路径、同等审计。
+
+**怎么做 — 控制面 router 与认证如何挂 UDS**：控制面是**独立于数据面**的第二个 axum `Router`，绑 `control.sock`（`0600`）；它与数据面 router **不共享注入集合**——这里注入的是 `PolicyRepo`（事务写）、机密面录入接口、`AuditSink`，而**没有**连接池/Sanitizer 出口（控制面不服务 Agent）。认证以 axum 中间件层形态前置在全部端点之上：先 `SO_PEERCRED` 取对端 uid 比对（即便同 uid 也要过），再校验控制面专用本地凭证——二者皆过才进 handler。设计取舍：`0600` 只对不同 uid 设防，故**必须叠加同 uid 也成立的控制面认证**，使"恰好同 uid"不等于"自动 admin"（硬前置条件②的运行时一半，另一半是 boot 的可连 uid 自检）。
+- **写入三联动的编排次序**：每个写 handler 是一条固定序列——`PolicyRepo` 开事务 → 写（经 `base`，乐观锁/逻辑删除/级联由 store 层落地）→ COMMIT → **同一写锁临界区内**触发快照重建（`Arc` 原子替换）→ 落 `policy_change`/`credential_event`/`mode_change` 审计。设计取舍：快照重建与事务写**同临界区**，避免"已 COMMIT 但快照未换"的可见性裂缝；三者任一失败即整体不生效（事务不 COMMIT/不重建/返回错误并审计），不留半截状态（公理三：无双源）。带机密的写（资源接入、凭证签发轮换）先调机密面原子写 vault，机密写失败即整体回退、策略变更不提交。
+- **乐观锁端到端如何贯通**：读端点在响应里回带 `version`；更新/删除 handler 从请求体/header 取**期望 `version`** 作为 UPDATE 的 `WHERE ... AND version = ?` 条件，影响行数为 0 即版本冲突 → 映射 `409 Conflict` 并落一条 `policy_change`（记录冲突）。期望 version 的唯一来源是调用方先前读取值，**不在 handler 内自读自比**（自读自比使乐观锁恒成立=失效）；系统协调写（sweeper 幂等谓词回收）无"读后写"竞态，**不走乐观锁**。
+- **审批挂起如何编排（escalate 不立即折叠的分支）**：审批关闭时 `escalate ≡ deny`（取 fallback 恒 deny），管线内立即返回 `escalate_denied`、不进队列。审批开启时 `escalate` 进**内存挂起队列**（持久化必要恢复元数据），挂请求 `request_id` 与超时定时器；`GET /v1/approvals` 查询、`POST /v1/approvals/{id}/approve|deny` 裁决（裁决写审计）。两条 fail-closed 取舍：①超时即 deny（`on_timeout` 固定 `deny`，settings 写入与 import 校验都拒绝 `allow`），sweeper 兜底回收超时仍未裁决项并写审计；②**daemon 重启时一切挂起审批恒 deny**——不跨重启"复活"一个待批的危险操作，重启后内存队列为空即等同全部超时拒绝。
 
 ### 3.5 connpool — 连接管理
 
@@ -90,13 +110,38 @@ src/
 - **归池前会话净化（不变量）**：复用前强制重置会话态（如 PostgreSQL `DISCARD ALL`、重置 `search_path`、回滚未决事务、清临时表）；净化失败的连接销毁而不归池（fail-closed）。
 - **连接审计（`connection_event`）**：通路建立/健康剔除/回收经 `AuditSink::record` 落 `connection_event`（字段为 resource、tier 名、transport 种类，不含真实地址/凭据）；该审计由连接管理层写入（传输层只如实上报健康事实、不写审计，见 6.4）。
 
+**怎么做 — 池数据结构与获取/复用/健康/回收/中断的形态**：池的核心是一张以 `(ResourceCode, CredentialTier)` 为键的并发表（`DashMap` 类形态或 `Mutex`/`RwLock` 守护的 `HashMap`），每个键映射一个**池槽**，池槽内含：空闲 `Channel` 队列、在用计数、该键的并发上限、退避状态机、等待者队列。键里含 `tier` 即在结构层面实现"不同 tier 永不共享连接"——账号隔离落到数据结构而非运行时判断，从根上杜绝一条只读连接被升格执行写。
+- **acquire 数据流**：收到 `Decision::Allow{tier}` → `acquire(resource, tier)` 定位池槽 → 命中空闲且健康的 `Channel` 即出借（复用，不重建）；无空闲且未达上限 → 向机密面**一次性**取 `(ResolvedTarget, ResourceCredential)` 不透明句柄、**即时**传入 `Transport::open` 得新 `Channel`，**句柄不出本次调用边界**（调用一返回即释放，不入池、不缓存——凭据零接触的运行点）；达上限 → 进有界等待队列或 `deny`（fail-closed）。`acquire` 返回的是**租约**形态（如 RAII guard），析构时把健康连接归还池槽、把损坏连接销毁，归还前强制会话净化。
+- **复用与会话净化的次序**：复用一定发生在**净化成功之后**——租约归还（或下次借出前）跑 `DISCARD ALL`/重置 `search_path`/回滚未决事务/清临时表；净化是不变量不是优化，**净化失败的连接直接销毁不归池**（fail-closed），下个请求只会拿到干净连接。对存在会话副作用且无法可靠净化的形态，整类禁用复用（即建即用即弃）。
+- **健康与退避状态机**：`persistent` 通路池化复用并周期健康检查，传输层**只上报通路死亡、绝不自行重建**——重建决策与节奏归本层。退避是每键一个状态机：死亡 → 指数退避（基数 1s、上限 60s、带抖动）择时重建，退避期内对该键的 `acquire` 走 deny 或有界等待而非风暴重连。非长连接 transport 不入池、不进退避，即建即用即弃。
+- **上限与背压如何量化**：每键并发上限与全局上限均为**常量封顶**；超限的请求落入**有界**等待队列（容量上限 `Q`，与灌注量无关），队列触顶即背压（对上游施压）或 `deny, stage=connect`——绝不无界缓冲、绝不静默放行第三种结果。observe 类大流的缓冲占用峰值受 `Q` 钳制。
+- **强制中断 vs 优雅回收的分流**：两条回收路径语义不同。空闲回收（默认 10min）与优雅销毁**排空在途请求**后关闭。freeze/吊销则对相关 `(resource[, principal])` 在用连接**强制 abort/cancel**——下达取消底层查询、关闭隧道的指令（物理执行归传输，决策归本层），不等其优雅跑完；这是 6.2"对已进入执行阶段的在飞操作"唯一真正的中断手段，优雅排空只是"不再接新"。
+- **连接审计的写入点**：通路建立/健康剔除/回收/强制中断各落一条 `connection_event`，字段恰为 resource、tier 名、transport 种类——**绝不含真实地址/凭据**（地址/凭据从未进入本层可读形态，传输层错误跨边界前已脱敏为不含地址的错误码）。
+
 ### 3.6 sweeper — TTL 回收后台任务
 
 事务性回收过期记录并写审计：`temp_grants`（写 `ended_at`/`end_reason=expired`）、`credentials.expires_at`、`mode_state.expires_at`、审批超时挂起项。回收后在同一写锁内重建快照。正确性不依赖 sweeper 时序——过期判定在求值时刻按墙钟二次校验（见 6.2），sweeper 只做"可见性回收 + 留痕打扫"。
 
+**怎么做 — 定时任务的形态与"打扫"语义**：sweeper 是一个 tokio 周期任务（`tokio::time::interval` 节拍），每拍以 `actor=system` 走与人写**同一** `PolicyRepo` 事务路径：在一个事务里用谓词扫出 `expires_at < now` 的过期行、按表写终态（`temp_grants` 写 `ended_at` + `end_reason='expired'`、`credentials`/`mode_state` 按各自终态字段回收、审批超时项写裁决），COMMIT 后**与控制面写共用同一写锁临界区重建快照**、落 `policy_change`/`mode_change` 审计。设计取舍：sweeper 的写是**幂等谓词驱动**（"凡过期则回收"），无"读后写"竞态，故**不走乐观锁**；这也是它能与人写共路却不冲突的原因。
+- **为何正确性不依赖 sweeper 时序**：过期的安全判定**不在** sweeper——`Evaluator`/`Authenticator` 在求值时刻就按墙钟 `expires_at >= now` 二次校验，过期格/凭证即刻不可见（见 6.2）。sweeper 只做两件**非安全承重**的事：把过期记录从库里"可见性回收"（让 `grants` 视图与重建后的快照不再带它）+ 留下 `expired` 审计痕迹。因此即便 sweeper 长时间未跑（或刚崩溃重启），安全语义不破——这是把"打扫"与"判定"解耦的关键取舍，避免把安全正确性押在后台任务的活性上。
+
 ### 3.7 sanitize — Sanitizer 执行
 
 实现 `Sanitizer` trait：小响应/错误串/拒绝响应整体脱敏（`scrub`），流式大输出走滑动重叠窗口（`scrub_stream`，保留上块尾部 N 字节参与下块匹配，消除边界分块逃逸，N 取 ScrubSet 最长匹配模式上界，有界缓冲与背压）。脱敏材料两路：机密面签发的**系统级 ScrubSet 不透明句柄**（只能 match-and-erase）+ 来自 `grant_constraints.kind='mask_fields'` 的声明级 `MaskRule`。
+
+**怎么做 — 句柄如何应用与滑窗状态**：本模块**只持有**机密面签发的 ScrubSet 不透明句柄，对它只调 match-and-erase——不可枚举、不可序列化、读不出内容（即便本模块代码亦然）。`scrub(payload, declared)` 对完整小 payload 一次性套两路材料：先过系统级 ScrubSet 句柄擦真实地址/凭据/私网段/连接串，再按 `declared` 的 `MaskRule` 擦声明字段。`scrub_stream(declared)` 是带状态的流式适配器：维护一个**重叠尾缓冲**（`carry`，长度 `N-1`，`N`=ScrubSet 最长匹配模式上界），每块输入与上块 `carry` 拼接后匹配擦除，再把本块尾部 `N-1` 字节存入 `carry` 留给下块——这样敏感串即便恰好跨 chunk 边界被切开也仍落在某次匹配窗口内，消除分块逃逸。缓冲**有界**，下游消费慢即对上游背压（与连接层有界排队同 fail-closed 取舍），不无界堆积。
+- **脱敏无"放行"分支的取舍**：擦除是**单向**操作——匹配即擦、不匹配即原样过，不存在"匹配失败就直出明文"的语义分支。系统级 ScrubSet 本质是黑名单兜底，真正的机密不外泄保证来自上游匿名化（Agent 只见代号）与凭据零接触（凭据从不进响应路径），本模块是其上的尽力而为兜底，而非绝对识别保证。
+
+### 3.8 实现要点与工程约束
+
+本子小节汇总各内部模块共担的工程级实现约束（不重复 §3.1~§3.7 的逐模块"怎么做"，只给跨模块一致的承重事实）；与全局工程规范一致处一句话引用《详细设计文档》7.x，不整段重抄。
+
+- **并发与线程模型（tokio 多线程）**：进程跑 tokio 多线程运行时；数据面每连接一个 task，管线内 `classify`/`acquire`/`execute` 等 IO 点 `await`，无阻塞独占。**唯一被串行化的是策略写**——控制面与 sweeper 经一把写互斥锁进入 `PolicyRepo`（rusqlite 同步 API），COMMIT 与快照重建在同一临界区完成，故写路径单线程、读路径（快照）无锁高并发。数据面**只读** `Arc<PolicySnapshot>`（`Arc::clone` 即取，微秒级、零锁），写侧 `Arc` 原子替换不阻塞读侧。连接池每键状态用细粒度锁/并发表守护，跨键无争用。`SO_PEERCRED` 走 `tokio UnixStream::peer_cred` 安全 API（无 `unsafe`）。
+- **同步存储调用的异步边界（本 crate 承接 store 的同步签名）**：`postern-store` 只暴露同步 API、不替调用方决定并发模型（见 02-store §3.6），故"在 tokio 上下文里调同步 rusqlite/`JsonlAuditSink`"的承接责任落在本 crate——本 crate 是装配点也是那个异步调用方。承接形态：`control`/`sweeper`/`kernel` 对 `PolicyRepo` 事务、快照重建全量读、`AuditSink::record` 这类**会阻塞 OS 线程**的同步调用，一律置于 `spawn_blocking` 边界（或专用阻塞线程池）执行，**绝不在异步 worker 线程上直接同步阻塞**——否则一笔慢事务/慢 fsync 会拖住整个 runtime 的 reactor、间接拖慢全部数据面请求。设计取舍：写本就经一把写锁串行，把它放进阻塞线程池**不削弱串行性**（锁仍在），只把"同步阻塞"与"异步 reactor"两类执行体隔离开；审计 `record` 是高频点，其阻塞同样隔离在该边界外，避免 fsync 抖动反压到数据面 `await` 链上。
+- **错误处理与传播**：每 crate 一个 thiserror 错误枚举；core 维护"错误变体→拒绝阶段"穷尽 match（新增变体不写映射即编译失败）。本 crate 的映射纪律：求值链任一 `Err`→对应 `stage` 的 deny（auth/classify/rbac/constraint/condition）；`acquire`/`Transport::open`/机密解析失败→`stage=connect` 的 deny（fail-closed，不降级、不改路）；`AuditSink::record` 失败按两阶段时序处置（只读 deny / intent 写不进执行前 deny / outcome 失败返"已执行但审计降级"码，绝不返 deny）。**kernel 路径禁吞错放行**（`.ok()`/`.unwrap_or(true)`/`.unwrap_or_default()`/`.unwrap_or_else(|_| true)`），由契约 `EVAL_NO_ERROR_SWALLOWING`（扫 `src/kernel/`）强制。panic 政策：数据面 router 挂 CatchPanic 层，任何 panic→脱敏 deny + `kind=anomaly` 审计；`anyhow` 仅出现在 `main`，全 crate `unsafe_code = forbid`、clippy `unwrap_used`/`expect_used`/`panic` 等 deny（详见 7.1/7.2）。
+- **性能与资源边界**：求值读路径为快照内存查表，复杂度与库大小无关、微秒级、零库访问。连接池每键并发上限与全局上限为**常量封顶**，超限走容量上限 `Q` 的**有界**等待队列，触顶即背压或 `deny, stage=connect`——缓冲峰值 `≤ Q`、与灌注量无关，杜绝无界缓冲耗内存。退避有上界（基数 1s、上限 60s、带抖动），退避期不风暴重连。流式脱敏滑窗缓冲有界并对上游背压。长操作设可被控制面信号打断的检查点/超时，使在飞危险操作有可控中止路径。
+- **测试策略**：kernel/管线逻辑用**内存 Fake 全插件驱动**——以纯内存 `PolicySnapshot` + Fake `Authenticator`/`Adapter`/`ConditionPredicate`/`Transport`/`AuditSink`/`CredentialProvider`/`Sanitizer` 注入，断言"给定输入→管线调用序与决策/审计恰为某可观察结果"（管线短路点、[4] 先于 evaluate、两阶段审计时序、各 `stage` deny、连接不可建即 deny、净化失败销毁、tier 不共享——对齐 §8 F-3/L-3/L-5~L-9/L-17 等，靠注入 Fake 失败触发 fail-closed 分支再观察行为）。控制面 API 走**集成测试**：起一个挂临时 `control.sock` 的 router，断言端点全集可达、写端点三联动齐发、集合分页钳制、乐观锁 `409`、审批裁决与重启恒 deny。boot 的 fail-closed 分支靠**前置条件可注入**测到——分别注入"开库/迁移/首快照/保险箱解锁失败""socket 创建早于装配完成""`data.sock` 可连 uid 含自身 uid"，断言进程非零退出、`data.sock` 未创建、数据面未开放（对齐 §8 F-1/F-2/L-1，与 02-store §3.6 的启动 fail-closed 注入同源）。connpool 的真实净化/退避/中断可对真实资源（容器）做端到端验证，但管线编排判定不依赖真实库。`postern verify` 九项与场景 02~07 以本 crate 为运行载体。
+- **可观测性（tracing 字段白名单，机密红线）**：运行日志（tracing）与审计事件流是两套东西，二者都不得泄漏机密。tracing 字段限白名单：`request_id`（与审计事件 id 同源、便于对账）、`principal`、`resource`（恒为代号）、`capability`、`stage`、`decision`、`duration_ms`；逐请求细节只进审计，tracing 限生命周期/连接/异常事件。**红线**：`Intent` 原文（SQL 可含业务敏感数据）、`PresentedCredential`、vault payload、`secret_ref` 解引用结果、真实地址一律禁止入日志——这些类型在类型层即 `Debug=REDACTED`/无 `Display`/不可 `Serialize`，tracing 字段无法直接记录它们。本 crate 产出的事件：数据面请求事件（intent/outcome，带 `stage`/`reason`）、`connection_event`（resource/tier 名/transport 种类，无地址/凭据）、控制面 `policy_change`/`credential_event`/`mode_change`/`lifecycle`、panic 的 `kind=anomaly`；一切审计正文写入前必经同一 Sanitizer（详见 7.5/7.2-3）。
 
 ---
 
