@@ -120,8 +120,7 @@ fn crate_src_files() -> Vec<(String, String)> {
             if path.is_dir() {
                 walk(&path, out);
             } else if path.extension().is_some_and(|ext| ext == "rs") {
-                let text =
-                    std::fs::read_to_string(&path).expect("crate source file is readable");
+                let text = std::fs::read_to_string(&path).expect("crate source file is readable");
                 out.push((path.display().to_string(), text));
             }
         }
@@ -325,10 +324,7 @@ fn jval<T: serde::Serialize>(value: &T) -> Value {
 }
 
 /// The documented deny-response example (scenario spec 01, trace 3).
-fn sample_deny_response(
-    request_hint: Option<&str>,
-    operator_note: Option<&str>,
-) -> DenyResponse {
+fn sample_deny_response(request_hint: Option<&str>, operator_note: Option<&str>) -> DenyResponse {
     DenyResponse {
         decision: "deny",
         denied: DeniedFacts {
@@ -338,7 +334,10 @@ fn sample_deny_response(
         },
         reason: "role=observer does not include docker-A:manage".to_string(),
         your_grants: BTreeMap::from([
-            (rc("db-main"), vec!["observe".to_string(), "query".to_string()]),
+            (
+                rc("db-main"),
+                vec!["observe".to_string(), "query".to_string()],
+            ),
             (rc("docker-A"), vec!["observe".to_string()]),
         ]),
         request_hint: request_hint.map(str::to_string),
@@ -591,7 +590,13 @@ fn test_deny_response_json_omits_unset_operator_note_but_keeps_request_hint_null
     keys.sort_unstable();
     assert_eq!(
         keys,
-        ["decision", "denied", "reason", "request_hint", "your_grants"]
+        [
+            "decision",
+            "denied",
+            "reason",
+            "request_hint",
+            "your_grants"
+        ]
     );
     assert_eq!(value["request_hint"], Value::Null);
 }
@@ -1144,7 +1149,9 @@ fn test_source_crate_wide_zero_construction_names_are_never_aliased_or_renamed()
             if !bounded {
                 continue;
             }
-            let span_end = stripped[end..].find(';').map_or(stripped.len(), |i| end + i);
+            let span_end = stripped[end..]
+                .find(';')
+                .map_or(stripped.len(), |i| end + i);
             let span = &stripped[end..span_end];
             for name in ["ResolvedTarget", "ResourceCredential"] {
                 assert!(
@@ -1163,9 +1170,9 @@ fn test_source_crate_wide_zero_construction_names_are_never_aliased_or_renamed()
                     continue;
                 }
                 let rest = stripped[end..].trim_start();
-                let renamed = rest.strip_prefix("as").is_some_and(|tail| {
-                    tail.as_bytes().first().is_none_or(|&b| !is_ident_byte(b))
-                });
+                let renamed = rest
+                    .strip_prefix("as")
+                    .is_some_and(|tail| tail.as_bytes().first().is_none_or(|&b| !is_ident_byte(b)));
                 assert!(
                     !renamed,
                     "{label} renames {name} with `as` - an alias reopens a \
@@ -1434,10 +1441,7 @@ fn test_credential_meta_field_set_is_metadata_plus_secret_hash_only() {
     assert_eq!(principal, pid(11));
     assert_eq!(kind, "api_key");
     assert_eq!(secret_hash, "sha256:2c26b46b68ffc68ff99b453c1d304134");
-    assert_eq!(
-        expires_at,
-        Some(Timestamp::from_unix_ms(1_767_225_600_000))
-    );
+    assert_eq!(expires_at, Some(Timestamp::from_unix_ms(1_767_225_600_000)));
     assert_eq!(revoked_at, None);
 }
 

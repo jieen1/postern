@@ -61,7 +61,8 @@ impl fmt::Debug for PresentedCredential {
 /// Real resolved address of a resource - opaque in this crate. The secrets
 /// crate is the sole producer; the transport's `open` call is the whole
 /// consumer lifetime (the value never travels further).
-pub struct ResolvedTarget // zero construction points in this crate
+pub struct ResolvedTarget
+// zero construction points in this crate
 {
     /// Resolved endpoint payload. Hidden from docs; `pub` solely for the
     /// secrets-crate struct literal.
@@ -80,7 +81,8 @@ impl fmt::Debug for ResolvedTarget // hand-written; never derived
 /// Resource credential material - opaque in this crate. Produced by the
 /// secrets crate (`CredentialProvider`), consumed once by the transport's
 /// `open`; never pooled, logged or serialized.
-pub struct ResourceCredential // zero construction points in this crate
+pub struct ResourceCredential
+// zero construction points in this crate
 {
     /// Credential material payload. Hidden from docs; `pub` solely for the
     /// secrets-crate struct literal.
@@ -95,7 +97,3 @@ impl fmt::Debug for ResourceCredential // hand-written; never derived
         f.write_str("REDACTED")
     }
 }
-
-
-
-

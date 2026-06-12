@@ -20,7 +20,7 @@
 //!   interpolation of external input into error strings).
 
 use postern_core::error::{
-    AuthError, AuditError, ClassifyError, ConstraintError, CredentialError, DiscoverError,
+    AuditError, AuthError, ClassifyError, ConstraintError, CredentialError, DiscoverError,
     ExecError, PredicateError, Stage, TransportError,
 };
 
@@ -370,7 +370,11 @@ fn test_expired_credential_is_attributed_exactly_to_auth_stage() {
 #[test]
 fn test_every_classify_error_variant_maps_to_classify_stage() {
     for e in all_classify_error_variants() {
-        assert_eq!(e.stage(), Stage::Classify, "{e:?} must be attributed to classify");
+        assert_eq!(
+            e.stage(),
+            Stage::Classify,
+            "{e:?} must be attributed to classify"
+        );
     }
 }
 
@@ -379,7 +383,11 @@ fn test_every_classify_error_variant_maps_to_classify_stage() {
 #[test]
 fn test_every_constraint_error_variant_maps_to_constraint_stage() {
     for e in all_constraint_error_variants() {
-        assert_eq!(e.stage(), Stage::Constraint, "{e:?} must be attributed to constraint");
+        assert_eq!(
+            e.stage(),
+            Stage::Constraint,
+            "{e:?} must be attributed to constraint"
+        );
     }
 }
 
@@ -388,7 +396,11 @@ fn test_every_constraint_error_variant_maps_to_constraint_stage() {
 #[test]
 fn test_every_predicate_error_variant_maps_to_condition_stage() {
     for e in all_predicate_error_variants() {
-        assert_eq!(e.stage(), Stage::Condition, "{e:?} must be attributed to condition");
+        assert_eq!(
+            e.stage(),
+            Stage::Condition,
+            "{e:?} must be attributed to condition"
+        );
     }
 }
 
@@ -404,7 +416,11 @@ fn test_undecidable_predicate_is_attributed_exactly_to_condition_stage() {
 #[test]
 fn test_every_transport_error_variant_maps_to_transport_stage() {
     for e in all_transport_error_variants() {
-        assert_eq!(e.stage(), Stage::Transport, "{e:?} must be attributed to transport");
+        assert_eq!(
+            e.stage(),
+            Stage::Transport,
+            "{e:?} must be attributed to transport"
+        );
     }
 }
 
@@ -437,7 +453,11 @@ fn test_every_exec_error_variant_maps_to_exec_stage() {
 #[test]
 fn test_every_discover_error_variant_maps_to_discover_stage() {
     for e in all_discover_error_variants() {
-        assert_eq!(e.stage(), Stage::Discover, "{e:?} must be attributed to discover");
+        assert_eq!(
+            e.stage(),
+            Stage::Discover,
+            "{e:?} must be attributed to discover"
+        );
     }
 }
 
@@ -462,7 +482,11 @@ fn test_every_audit_error_variant_maps_to_audit_stage() {
 #[test]
 fn test_auth_error_display_is_constant_english_text() {
     for e in all_auth_error_variants() {
-        assert_eq!(rendered(&e), pinned_auth_display(&e), "{e:?} Display drifted");
+        assert_eq!(
+            rendered(&e),
+            pinned_auth_display(&e),
+            "{e:?} Display drifted"
+        );
     }
 }
 
@@ -471,7 +495,11 @@ fn test_auth_error_display_is_constant_english_text() {
 #[test]
 fn test_transport_error_display_is_sanitized_constant_code() {
     for e in all_transport_error_variants() {
-        assert_eq!(rendered(&e), pinned_transport_display(&e), "{e:?} Display drifted");
+        assert_eq!(
+            rendered(&e),
+            pinned_transport_display(&e),
+            "{e:?} Display drifted"
+        );
     }
 }
 
@@ -480,7 +508,11 @@ fn test_transport_error_display_is_sanitized_constant_code() {
 #[test]
 fn test_credential_error_display_carries_no_secret_material() {
     for e in all_credential_error_variants() {
-        assert_eq!(rendered(&e), pinned_credential_display(&e), "{e:?} Display drifted");
+        assert_eq!(
+            rendered(&e),
+            pinned_credential_display(&e),
+            "{e:?} Display drifted"
+        );
     }
 }
 
@@ -489,22 +521,46 @@ fn test_credential_error_display_carries_no_secret_material() {
 #[test]
 fn test_remaining_error_displays_are_constant_english_text() {
     for e in all_classify_error_variants() {
-        assert_eq!(rendered(&e), pinned_classify_display(&e), "{e:?} Display drifted");
+        assert_eq!(
+            rendered(&e),
+            pinned_classify_display(&e),
+            "{e:?} Display drifted"
+        );
     }
     for e in all_constraint_error_variants() {
-        assert_eq!(rendered(&e), pinned_constraint_display(&e), "{e:?} Display drifted");
+        assert_eq!(
+            rendered(&e),
+            pinned_constraint_display(&e),
+            "{e:?} Display drifted"
+        );
     }
     for e in all_predicate_error_variants() {
-        assert_eq!(rendered(&e), pinned_predicate_display(&e), "{e:?} Display drifted");
+        assert_eq!(
+            rendered(&e),
+            pinned_predicate_display(&e),
+            "{e:?} Display drifted"
+        );
     }
     for e in all_exec_error_variants() {
-        assert_eq!(rendered(&e), pinned_exec_display(&e), "{e:?} Display drifted");
+        assert_eq!(
+            rendered(&e),
+            pinned_exec_display(&e),
+            "{e:?} Display drifted"
+        );
     }
     for e in all_discover_error_variants() {
-        assert_eq!(rendered(&e), pinned_discover_display(&e), "{e:?} Display drifted");
+        assert_eq!(
+            rendered(&e),
+            pinned_discover_display(&e),
+            "{e:?} Display drifted"
+        );
     }
     for e in all_audit_error_variants() {
-        assert_eq!(rendered(&e), pinned_audit_display(&e), "{e:?} Display drifted");
+        assert_eq!(
+            rendered(&e),
+            pinned_audit_display(&e),
+            "{e:?} Display drifted"
+        );
     }
 }
 
@@ -578,14 +634,49 @@ fn test_source_has_no_wildcard_arm_and_no_non_exhaustive() {
 fn test_source_keeps_explicit_per_variant_stage_arms() {
     let code = stripped_code(ERROR_MOD_SRC);
     assert_explicit_stage_arms(&code, "AuthError", Stage::Auth, &all_auth_error_variants());
-    assert_explicit_stage_arms(&code, "ClassifyError", Stage::Classify, &all_classify_error_variants());
-    assert_explicit_stage_arms(&code, "ConstraintError", Stage::Constraint, &all_constraint_error_variants());
-    assert_explicit_stage_arms(&code, "PredicateError", Stage::Condition, &all_predicate_error_variants());
-    assert_explicit_stage_arms(&code, "TransportError", Stage::Transport, &all_transport_error_variants());
-    assert_explicit_stage_arms(&code, "CredentialError", Stage::Tier, &all_credential_error_variants());
+    assert_explicit_stage_arms(
+        &code,
+        "ClassifyError",
+        Stage::Classify,
+        &all_classify_error_variants(),
+    );
+    assert_explicit_stage_arms(
+        &code,
+        "ConstraintError",
+        Stage::Constraint,
+        &all_constraint_error_variants(),
+    );
+    assert_explicit_stage_arms(
+        &code,
+        "PredicateError",
+        Stage::Condition,
+        &all_predicate_error_variants(),
+    );
+    assert_explicit_stage_arms(
+        &code,
+        "TransportError",
+        Stage::Transport,
+        &all_transport_error_variants(),
+    );
+    assert_explicit_stage_arms(
+        &code,
+        "CredentialError",
+        Stage::Tier,
+        &all_credential_error_variants(),
+    );
     assert_explicit_stage_arms(&code, "ExecError", Stage::Exec, &all_exec_error_variants());
-    assert_explicit_stage_arms(&code, "DiscoverError", Stage::Discover, &all_discover_error_variants());
-    assert_explicit_stage_arms(&code, "AuditError", Stage::Audit, &all_audit_error_variants());
+    assert_explicit_stage_arms(
+        &code,
+        "DiscoverError",
+        Stage::Discover,
+        &all_discover_error_variants(),
+    );
+    assert_explicit_stage_arms(
+        &code,
+        "AuditError",
+        Stage::Audit,
+        &all_audit_error_variants(),
+    );
 
     let stage_code = stripped_code(STAGE_SRC);
     for s in all_stage_variants() {
@@ -622,7 +713,10 @@ fn test_source_error_texts_are_constant_brace_free_literals() {
             rest.starts_with('"'),
             "7.2-1: every #[error(...)] must be a plain string literal (no transparent/fmt forms)"
         );
-        let end = rest[1..].find('"').expect("unterminated #[error] string literal") + 1;
+        let end = rest[1..]
+            .find('"')
+            .expect("unterminated #[error] string literal")
+            + 1;
         let text = &rest[1..end];
         assert!(
             !text.contains('{') && !text.contains('}'),
