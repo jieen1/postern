@@ -152,6 +152,7 @@ postern/
 - [技术设计文档](docs/本地安全网关-技术设计文档.md) — 定位与公理、形态与进程、领域模型、架构分层、请求求值、权限管理、身份与凭证、连接与传输、匿名化与脱敏、可扩展性、存储、安全模型、端到端流程
 - [详细设计文档](docs/本地安全网关-详细设计文档.md) — 技术选型决策、代码分层（cargo workspace）、核心模块与接口签名、数据库 schema 与存储格式、关键机制、工程规范、各领域范围与内涵（第八部分）
 - [模块详细设计](docs/modules/00-模块详细设计-索引与规约.md) — 每个 crate 一篇的模块级设计：定位、职责、功能、边界、与相邻模块的交互细节、必守不变量（postern-core / store / secrets / transports / adapters / daemon / cli）
+- [示例：多资源多 Agent 授权](docs/examples/01-多资源多Agent授权示例.md) — 两机（SSH/SSM）+ 业务系统（用/管拆资源、会话凭据认证）/docker/redis/数据库/MQ + 三 Agent 差异化授权的完整建模、TOML 声明与 pipeline trace
 
 ## License
 

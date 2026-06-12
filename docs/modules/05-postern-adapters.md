@@ -19,7 +19,7 @@
 **职责范围（封闭列举）**：
 
 1. **`classify`——协议感知语义归一化**：把协议原始 `Intent` 翻译为 `ClassifiedIntent { capability, objects }`。SQL 类为语法树级归类，**按语句树内出现的最高危写节点定档**（见 §3.1）；无法可靠归类一律 `Err`（公理二）。
-2. **细则语义的定义与 `check_constraint`**：定义各细则 `kind`（`table_allow` / `container_prefix` / `command_template` / `http_route` / `mask_fields`）的语义，并对一个已物化的 `ClassifiedIntent` 按 `ConstraintSpec` 判定通过/不通过。
+2. **细则语义的定义与 `check_constraint`**：定义本协议支持的各细则 `kind`（按资源类型：`table_allow`/`column_mask`、`container_prefix`、`http_route`、`command_template`/`script_template`/`path_whitelist`、`key_prefix`/`command_class`、`vhost_allow`/`queue_prefix`/`route_allow`、`mask_fields`——完整语义见 §3.2）的语义，并对一个已物化的 `ClassifiedIntent` 按 `ConstraintSpec` 判定通过/不通过。
 3. **`execute`**：在连接管理层提供的 `Channel` 上执行**已被求值放行**的 `Intent`，产出未脱敏的 `RawResponse`。
 4. **能力声明与 `engine_enforced` 声明**：经 `protocol()` / `capabilities()` 申明协议名与可承载动词集；经 `engine_enforced()` 如实申明该协议是否存在引擎级强制兜底（SQL 类 `true`，HTTP/容器类 `false`，见 §3.3）。
 5. **Intent 负载格式的定义**（速查表"Intent 负载格式 → 适配器（唯一解释者）"）：定义本协议 `Intent` 的结构，**含 MCP 动词工具的参数 schema**——即 `postern_query` / `postern_mutate` 等工具向 Agent 暴露的 `(resource, request...)` 中 `request` 的形态。
@@ -65,13 +65,23 @@ SQL 文本 → sqlparser(PostgreSqlDialect) → Vec<Statement>
 
 `check_constraint(spec, ci) -> Result<bool, ConstraintError>`，`false / Err → deny`。本 crate 是各 `kind` 语义的属主：
 
-| 细则 `kind` | 语义（适配器定义并判定） |
-|---|---|
-| `table_allow` | 归类提取的 `objects` 中的 schema.table 必须全部落在 `spec.tables` 白名单内（postgres） |
-| `container_prefix` | 目标容器名必须匹配 `spec` 声明的前缀（docker_logs） |
-| `command_template` | 请求必须匹配预声明的命令模板，模板外的自由命令一律不通过 |
-| `http_route` | 请求路径/方法必须落在 `spec` 声明的路由白名单内（http） |
-| `mask_fields` | 声明需脱敏的列/字段名；**由内核出口的 `Sanitizer` 执行擦除**（适配器只定义声明形态，不执行脱敏，见 §4） |
+每个 `kind` 由其属主 Adapter 定义语义（与《详细设计文档》5.2 `grant_constraints.kind` 枚举一一对应）：
+
+| 细则 `kind` | 属主 adapter | 语义（适配器定义并判定） |
+|---|---|---|
+| `table_allow` | postgres/mysql | 归类提取的 `objects` 中的 schema.table 必须全部落在 `spec.tables` 白名单内 |
+| `column_mask` | postgres/mysql | 声明 query/mutate 不得触及的敏感列（区别于 `mask_fields` 的响应擦除——本 kind 在求值期拒绝触达） |
+| `container_prefix` | docker | 目标容器名必须匹配 `spec` 声明的前缀 |
+| `http_route` | http | 请求 `(method, path)` 必须落在 `spec` 路由白名单内（即"接口维度限制"——可对读/写分别声明不同路径） |
+| `command_template` | command | 请求必须匹配预声明的参数化命令模板，模板外的自由命令一律不通过 |
+| `script_template` | command/deploy | `execute` 只能实例化 `spec` 声明的脚本模板集合（"某些脚本"） |
+| `path_whitelist` | command/deploy | 模板中的目标路径参数必须落在 `spec` 目录白名单内（"某些目录"） |
+| `key_prefix` | redis | 命令触及的 key 必须匹配 `spec` 前缀白名单 |
+| `command_class` | redis | 命令必须落在 `spec` 声明的命令类白名单内（如仅 `@read`） |
+| `vhost_allow` | rabbitmq | 操作的 vhost 必须落在 `spec` 白名单内 |
+| `queue_prefix` | rabbitmq | 目标队列名必须匹配 `spec` 前缀 |
+| `route_allow` | rabbitmq | 发布/绑定的 routing key 必须落在 `spec` 白名单内 |
+| `mask_fields` | 任意（声明形态） | 声明需脱敏的列/字段名；**由内核出口的 `Sanitizer` 执行擦除**（适配器只定义声明形态，不执行脱敏，见 §4） |
 
 合并语义遵循《详细设计文档》5.2"约束合并"：同 `kind` 多行默认取交集（全部须满足，fail-closed）；不同 `kind` 之间恒 `AND`；任一 `kind` 若采"白名单并集"语义须在其 `spec` 文档显式声明扩权特性（默认不取并集）。
 
