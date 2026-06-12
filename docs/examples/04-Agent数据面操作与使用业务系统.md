@@ -27,17 +27,17 @@
 
 ## 2. 预期实现路径
 
-`agent3` 的每个数据面请求,无论经 MCP 工具还是 HTTP 外壳进入,都在 [0] 归一化后与外壳无关,完整走《详细设计文档》6.1 管线 `[0]→[10]`(对齐技术设计 5.1);任一步判定拒绝即短路进入拒绝响应组装。三件事的差异只在 [2] 归类结果、[6] 选中的 tier、[7b] 取连接的方式,**骨架完全一致**(公理七、详细设计 6.1)。
+本场景三件事分由两个 Agent 发起(`agent2` 查库、`agent3` 下单与看日志,各落在 01/03 既有矩阵内)。每个数据面请求,无论经 MCP 工具还是 HTTP 外壳进入,都在 [0] 归一化后与外壳无关,完整走《详细设计文档》6.1 管线 `[0]→[10]`(对齐技术设计 5.1);任一步判定拒绝即短路进入拒绝响应组装。三件事的差异只在 [1] 认证出的 `PrincipalId`、[2] 归类结果、[6] 选中的 tier、[7b] 取连接的方式,**骨架完全一致**(公理七、详细设计 6.1)。
 
 **控制面 vs 数据面**:本场景全部是**数据面动作**(求值 + 执行)。授权、接入、auth_flow 写入、细则声明都是控制面动作,已在场景 02/03 完成,本场景不重复;运行期一切凭据物化、会话续期均**无人值守**(详细设计 6.13 运行期物化、技术设计公理二"人不在环是常态")。
 
 **逐件路径**:
 
-1. **查库(`agent2` · `db-main` query)** — 管线 [2] `postgres` 适配器 `classify` 把 SQL 经**语法树解析**归为 `Query`(技术设计 5.2 协议感知,非文本匹配);[3] RBAC 命中 `agent2` 在 `db-main` 上的 `(db-main, query)` 格(`agent2`'B 数据库只读',01 §3.2 对 `db-main` 授 `observe`+`query`——该格在既有矩阵内,无需追加授权);[6] 策略引擎按动词 `query` 选 `ro`(SELECT-only 账号);[7b] `connpool.acquire(db-main, ro)`,池键 `(db-main, ro)`,经 `ssm` Transport 建到 B 的本地 socket 通路(技术设计第四部分·⑥传输层"把远端接入抽象为本地 socket"、详细设计 6.3);[8] 以 SELECT-only 账号执行;[9] `Sanitizer::scrub` 系统级 ScrubSet 擦真实地址/凭据 + 声明级 `column_mask` 擦 PII 列(详细设计 6.4);[10] 结果审计落 **outcome**(query 为只读动词,沿用执行后单次审计,不走两阶段 intent,详细设计 6.1)。
-2. **下单(`svc-order` mutate)** — 管线 [2] `http` 适配器 `classify` 把 `POST /api/orders` 归为 `Mutate`;[4] 细则 `http_route` 白名单校验路由(01 §3.3 b3-1);[5] 条件 `time_window` 校验工作时段(01 §4 conditions);[6] 策略引擎选 `op`(订单系统业务操作账号);[7a] 有副作用动词先落 **intent** 审计(详细设计 6.1 两阶段);[7b] 取连接时经 `CredentialProvider.credential_for(svc-order, op)` 查 **live-session 缓存**——命中且未临近过期则**直接复用(不重登)**,临近过期则 single-flight 续会话,硬过期则 fail-closed(详细设计 6.13 运行期物化);活跃会话以"请求注入描述"(Cookie / CSRF 回填)交 `http` 适配器贴到转发请求;[8] 转发到订单系统;[9] 脱敏(`mask_fields` 擦响应里 `customer.email`/`phone`);[10] 落 **outcome** 审计(与 intent 同请求 id 关联)。
-3. **看日志(`docker-A` observe)** — 管线 [2] `docker` 适配器 `classify` 把"取容器日志"归为 `Observe`;[3] RBAC 命中 `agent3` 对 `docker-A` 的 observer 绑定(01 §3.3 b3-2);[4] 细则 `container_prefix=app-` 校验容器名前缀;[6] 策略引擎选 `logs`(只读日志 API,非裸 socket);[7b] `connpool.acquire(docker-A, logs)`,经 `ssh` Transport 建通路;[8] 经只读日志端点取日志(流式大输出);[9] **流式脱敏**——跨 chunk 滑动重叠窗口擦内网 IP/PII,有界缓冲与背压(详细设计 6.4 流式脱敏模型);[10] 审计。
+1. **查库(`agent2` · `db-main` query)** — 管线 [2] `postgres` 适配器 `classify` 把 SQL 经**语法树解析**归为 `Query`(技术设计 5.2 协议感知,非文本匹配);[3] RBAC 命中 `agent2` 在 `db-main` 上的 `(db-main, query)` 格(`agent2`'B 数据库只读',01 §3.2 对 `db-main` 授 `observe`+`query`——该格在既有矩阵内,无需追加授权);[6] 策略引擎按动词 `query` 选 `ro`(SELECT-only 账号);[7b] `connpool.acquire(db-main, ro)`,池键 `(db-main, ro)`,经 `ssm` Transport 建到 B 的本地 socket 通路(技术设计第四部分·⑥传输层"把远端接入抽象为本地 socket"、详细设计 6.3);[8] 以 SELECT-only 账号执行;[9] `Sanitizer::scrub` 系统级 ScrubSet 擦真实地址/凭据 + 声明级 `column_mask` 在结果带出 `public.customers.email/phone` 时掩码这些 PII 列(详细设计 6.4);[10] 结果审计落 **outcome**(query 为只读动词,沿用执行后单次审计,不走两阶段 intent,详细设计 6.1)。
+2. **下单(`agent3` · `svc-order` mutate)** — 管线 [2] `http` 适配器 `classify` 把 `POST /api/orders` 归为 `Mutate`;[4] 细则 `http_route` 白名单校验路由(01 §3.3 b3-1);[5] 条件 `time_window` 校验工作时段(01 §4 conditions);[6] 策略引擎选 `op`(订单系统业务操作账号);[7a] 有副作用动词先落 **intent** 审计(详细设计 6.1 两阶段);[7b] 取连接时经 `CredentialProvider.credential_for(svc-order, op)` 查 **live-session 缓存**——命中且未临近过期则**直接复用(不重登)**,临近过期则 single-flight 续会话,硬过期则 fail-closed(详细设计 6.13 运行期物化);活跃会话以"请求注入描述"(Cookie / CSRF 回填)交 `http` 适配器贴到转发请求;[8] 转发到订单系统;[9] 脱敏(`mask_fields` 擦响应里 `customer.email`/`phone`);[10] 落 **outcome** 审计(与 intent 同请求 id 关联)。
+3. **看日志(`agent3` · `docker-A` observe)** — 管线 [2] `docker` 适配器 `classify` 把"取容器日志"归为 `Observe`;[3] RBAC 命中 `agent3` 对 `docker-A` 的 observer 绑定(01 §3.3 b3-2);[4] 细则 `container_prefix=app-` 校验容器名前缀;[6] 策略引擎选 `logs`(只读日志 API,非裸 socket);[7b] `connpool.acquire(docker-A, logs)`,经 `ssh` Transport 建通路;[8] 经只读日志端点取日志(流式大输出);[9] **流式脱敏**——跨 chunk 滑动重叠窗口擦内网 IP/PII,有界缓冲与背压(详细设计 6.4 流式脱敏模型);[10] 审计。
 
-**匿名化贯穿请求侧**:`agent3` 在数据面只能以代号 `db-main`/`svc-order`/`docker-A` 发起,代号↔真实地址映射只存机密面,数据面无读取路径(技术设计 9.1、详细设计 9.1);它**无法枚举** Scope 外资源、无法持有任何 tier 账号(技术设计 9.3 硬保证)。
+**匿名化贯穿请求侧**:每个 Agent 在数据面只能以自身 Scope 内的资源代号发起——`agent2` 见 `db-main`、`agent3` 见 `svc-order`/`docker-A`;代号↔真实地址映射只存机密面,数据面无读取路径(技术设计 9.1、详细设计 9.1);二者均**无法枚举** Scope 外资源、无法持有任何 tier 账号(技术设计 9.3 硬保证)。
 
 ---
 
@@ -53,18 +53,18 @@
 
 ### 管理前端 SPA(人用,控制面 API 的视图)
 
-- **授权视图页**:渲染 `GET /v1/grants/agent3`,以 (资源×动词) 表展示 `agent3` 能干什么——给运维"它现在能做这三件事"的确认面。
-- **审计流页**:渲染 `GET /v1/audit?principal=agent3`,人可见每条请求的 decision/tier/capability/objects/response_digest(**不含响应内容明文**),mutate 行可下钻看 intent↔outcome 配对。
+- **授权视图页**:分别渲染 `GET /v1/grants/agent2` 与 `GET /v1/grants/agent3`,以 (资源×动词) 表展示各 Agent 能干什么——给运维"`agent2` 能查 `db-main`、`agent3` 能下单 `svc-order` 并看 `docker-A` 日志"的确认面。
+- **审计流页**:渲染 `GET /v1/audit?principal=agent2` 与 `?principal=agent3`,人可见每条请求的 decision/tier/capability/objects/response_digest(**不含响应内容明文**),mutate 行可下钻看 intent↔outcome 配对。
 - **拒绝聚合页**:渲染 `GET /v1/denials/summary`,本场景若触发异常(见 §4.2)会在此聚合显形。
 - SPA **不发起数据面请求**——它是控制面 API 的视图,数据面发起者只能是 Agent(公理七、控制面/数据面隔离,技术设计 2.3)。
 
 ### 数据面(Agent 用,MCP 工具 / HTTP 外壳)
 
-`agent3` 经固定动词工具面(详细设计 6.8)发起,工具集不随授权增删、描述只含事实:
+每个 Agent 经**同一套固定动词工具面**(详细设计 6.8)发起,工具集不随授权增删、对所有 Agent 一致、描述只含事实(本场景三件事各由有对应授权格的 Agent 调,无授权格者调同一工具在 [3] RBAC 被拒):
 
-- `postern_query(resource="db-main", request="<SQL>")` — 查库。
-- `postern_mutate(resource="svc-order", request={method, path, body})` — 下单。
-- `postern_observe(resource="docker-A", request={action:"logs", container:"app-order", ...})` — 看日志。
+- `postern_query(resource="db-main", request="<SQL>")` — 查库(本场景 `agent2` 调)。
+- `postern_mutate(resource="svc-order", request={method, path, body})` — 下单(本场景 `agent3` 调)。
+- `postern_observe(resource="docker-A", request={action:"logs", container:"app-order", ...})` — 看日志(本场景 `agent3` 调)。
 - `postern_grants()` — 取自身 `your_grants` 事实(自助分流用)。
 - `postern_surface()` — 取自身 Scope 内**已授权能力面**(授权快照投影,**禁止触达** `Adapter::discover`、不触底层资源,详细设计 6.8 CONS-20)。
 
@@ -95,7 +95,7 @@
 | [7a] 意图审计 | `query` 是只读动词,无副作用。**预期**:沿用执行后单次审计,不走两阶段 intent(详细设计 6.1)。 |
 | [7b] 取连接 | `connpool.acquire(db-main, ro)`,池键 `(db-main, ro)`;机密面解析 `(target, credential[ro])` → `ssm` Transport 建到 B 的本地 socket 通路 → `Channel`;**凭据引用即时释放**。**预期**:返回到 `db-main` 的 `ro` 通路(池中复用或新建);无承载 query 的 tier → deny;不可建 → deny(fail-closed)。 |
 | [8] 执行 | `postgres` 适配器 over `Channel` 以 SELECT-only 账号执行 → `RawResponse`。**预期**:返回已支付订单行;即便 SQL 被误归类,`ro` 账号在引擎层只有 SELECT,写被引擎直接拒(`engine_enforced=true` 兜底)。 |
-| [9] 脱敏 | `Sanitizer::scrub`:系统级 ScrubSet 擦任何真实地址/凭据回显;`column_mask` 擦 `public.customers.email/phone`。**预期**:返回的订单行中 PII 列已掩码,无任何真实 IP/连接串。 |
+| [9] 脱敏 | `Sanitizer::scrub`:系统级 ScrubSet 擦任何真实地址/凭据回显;声明级 `column_mask` 在结果触及 `public.customers.email/phone` 时掩码这些列(本查询仅取 `public.orders` 列,column_mask 对其为无操作;若查询联表带出 customers PII 则掩码生效)。**预期**:返回的订单行无任何真实 IP/连接串;凡带出的 PII 列一律掩码。 |
 | [10] 结果审计 | `AuditSink::record`:`kind=request, decision=allow, tier="ro", capability=query, objects=["public.orders"], response_digest=sha256(...)`(**不含内容**)。**预期**:`postern audit --principal agent2` 可见此条。 |
 
 **可验收净结果**:`agent2` 收到一组脱敏后的已支付订单数据(PII 列掩码),全程只见 `db-main` 代号,审计留痕。
@@ -133,7 +133,9 @@
 | [2] 语义归一化 | `docker` 适配器:取容器日志 → `Capability=Observe, objects=[container:app-order]`。**预期**:归 Observe。 |
 | [3] RBAC | `agent3` —observer→ resource `docker-A`(01 §3.3 b3-2)→ (docker-A, observe) 格存在。**预期**:命中 ✅;注意 `agent3` 对 `docker-A` **无 manage/destroy 格**(只能看日志,不能重启,与 `agent2` 精确区分)。 |
 | [4] 细则 | `container_prefix=app-` 校验 `app-order` 前缀匹配。**预期**:`passed=true`;请求非 `app-` 前缀容器(如 `app-` 外的系统容器)→ deny。 |
+| [5] 条件 | `docker-A` observe 无附加条件谓词。**预期**:通过(若有 time_window 等谓词,任一 false → deny)。 |
 | [6] 动作分流 | `Decision::Allow{ tier=logs }`:策略引擎选 **只读日志 API**(`logs`,非裸 socket)。**预期**:产出 `Allow{tier=logs}`——`docker.sock` 即 root,本路径绝不走全 socket(01 §1.2、5.2bis ④)。 |
+| [7a] 意图审计 | `observe` 是只读动词,无副作用。**预期**:沿用执行后单次审计,不走两阶段 intent(详细设计 6.1)。 |
 | [7b] 取连接 | `connpool.acquire(docker-A, logs)`,经 `ssh` Transport 建到 A 的本地 socket 通路。**预期**:到 `docker-A` 的 `logs` 通路;不可建 → deny。 |
 | [8] 执行 | `docker` 适配器经**只读日志端点**取 `app-order` 日志(**流式大输出**)。**预期**:返回该容器尾部日志流。 |
 | [9] 流式脱敏 | `Sanitizer::scrub` 按**流式模型**:跨 chunk 滑动重叠窗口(保留上一 chunk 尾部 N 字节参与下一 chunk 匹配,N=ScrubSet 最长模式长度上界),擦日志里的内网 IP/真实主机名/PII;有界缓冲与背压(详细设计 6.4)。**预期**:返回日志中任何内网 IP、真实地址、凭据回显已擦除,**敏感串不因恰好跨 chunk 边界而逃逸**。 |
@@ -176,13 +178,13 @@
 
 #### E. 超并发上限 → 背压或 deny
 
-- **触发**:`agent3`(或多 Agent)对 `svc-order` / `db-main` 并发请求超过每资源/全局并发上限。
+- **触发**:`agent3` 对 `svc-order`、`agent2` 对 `db-main`(或多 Agent 叠加)并发请求超过每资源/全局并发上限。
 - **系统行为**:连接管理层**有界排队**或超限 deny(fail-closed,详细设计 6.3);observe 类大流(看日志)按**有界缓冲 + 背压**——下游消费慢时对上游施压而非无界缓冲(详细设计 6.4)。
 - **预期结果**:超限请求要么有界排队后服务、要么得确定的 `decision=deny, reason="并发超限"`,**绝不无界堆积导致内存爆**;背压可观察(不丢正确性)。
 
 #### F. 跨 Principal 会话不串味(会话净化)
 
-- **触发**:`agent3` 的 `db-main:ro` 请求执行后连接归池;随后另一 Principal(或 `agent3` 另一请求)复用同一 `(db-main, ro)` 池连接。
+- **触发**:`agent2` 的 `db-main:ro` 请求执行后连接归池;随后另一 Principal(或 `agent2` 另一请求)复用同一 `(db-main, ro)` 池连接。
 - **系统行为**:归池前**强制会话净化**——PostgreSQL 类跑 `DISCARD ALL`、重置 `search_path`、回滚未决事务、清临时表/会话变量;净化失败的连接**销毁不归池**(fail-closed);对会话副作用无法可靠净化的形态禁用复用(即建即用即弃);对会话态敏感适配器评估把 `PrincipalId` 纳入池键隔离(详细设计 6.3)。
 - **预期结果**:复用连接**不携带**上一请求遗留的会话态/临时表/事务,跨请求/跨 Principal **零串味**;不同 tier 连接绝不共享(只读连接绝不被升格执行写)。
 
@@ -194,9 +196,9 @@
 
 #### H. daemon 重启后数据面恢复
 
-- **触发**:`agent3` 操作期间 daemon 重启,随后 `agent3` 再发 `postern_query`/`postern_mutate`。
-- **系统行为**:重启后 boot 序列重建 `PolicySnapshot`、解锁保险箱、开放数据面(模块 06 §3.1);live-session 缓存(内存、Zeroizing)随进程丢失 → 下次建连按持久凭据**重新登录/刷新**回填(详细设计 6.13);TTL/临时授权从权威库恢复并续计时(技术设计 6.2);**任何挂起审批恒 deny**(fail-closed,详细设计 6.10)。
-- **预期结果**:重启后 `agent3` 的请求按恢复后的权威策略正常裁决并执行;会话凭据自动重建(对 `agent3` 透明,典型档无需人介入);**绝无**跨重启复活的危险挂起操作。
+- **触发**:操作期间 daemon 重启,随后 `agent2` 再发 `postern_query`(db-main)、`agent3` 再发 `postern_mutate`(svc-order)。
+- **系统行为**:重启后 boot 序列重建 `PolicySnapshot`、解锁保险箱、开放数据面(模块 06 §3.1);live-session 缓存(内存、Zeroizing)随进程丢失 → 下次建连按持久凭据**重新登录/刷新**回填(svc-order 会话需重建;db-main 的 `ro` 是 SELECT-only 账号、无业务系统会话态,直接按凭据建连)(详细设计 6.13);TTL/临时授权从权威库恢复并续计时(技术设计 6.2);**任何挂起审批恒 deny**(fail-closed,详细设计 6.10)。
+- **预期结果**:重启后两个 Agent 的请求均按恢复后的权威策略正常裁决并执行;`agent3` 的 `svc-order` 会话凭据自动重建(对 `agent3` 透明,典型档无需人介入);**绝无**跨重启复活的危险挂起操作。
 
 #### I. 工具/资源代号不存在或拼错
 
