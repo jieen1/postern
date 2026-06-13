@@ -17,7 +17,7 @@ use crate::base::db::Db;
 use crate::base::error::StoreError;
 use postern_core::domain::{
     Capability, ConditionSpec, ConstraintSpec, CredentialMeta, CredentialTier, CredentialView,
-    GrantAction, GrantCell, PolicySnapshot, PrincipalId, ResourceCode, Role, TierDecl,
+    GrantAction, GrantCell, Mode, PolicySnapshot, PrincipalId, ResourceCode, Role, TierDecl,
 };
 use postern_core::id::SnowflakeId;
 
@@ -85,6 +85,13 @@ struct ConditionRow {
     spec: Option<String>,
 }
 
+/// 一条辖区运行模式（限制性表；`scope_resource_id` 为空 = 全局模式，
+/// 非空 = 该资源的模式覆盖）。失控切断的安全特性。
+struct ModeRow {
+    scope_resource_id: Option<i64>,
+    mode: String,
+}
+
 // ============================================================ 入口
 
 /// 在一次只读事务内把权威库投影为不可变 [`PolicySnapshot`]（`policy_rev` 为本次
@@ -110,6 +117,7 @@ pub fn build_snapshot(db: &Db, policy_rev: u64) -> Result<PolicySnapshot, StoreE
     let deny_notes = load_deny_notes(db, &resources)?;
     let constraints = load_constraints(db)?;
     let conditions = load_conditions(db)?;
+    let mode_rows = load_mode_state(db)?;
 
     // ---- 角色 → 有效动词（含继承传递闭包；返回 capability -> 声明它的 role_id）。
     let role_effective = expand_role_capabilities(&role_caps, &inherits);
@@ -191,6 +199,29 @@ pub fn build_snapshot(db: &Db, policy_rev: u64) -> Result<PolicySnapshot, StoreE
         caps.sort();
     }
 
+    // ---- 辖区运行模式物化（失控切断）：每行按 scope_resource_id 映射到
+    //      modes[None]（全局）或 modes[Some(resource)]（资源级）。store 只如实存
+    //      各辖区模式（meet 计算在 evaluator/core）；唯一索引保证每辖区至多一行，
+    //      但同辖区若出现多行（不该有），保守取最严（Mode::meet）兜底。指向不可见
+    //      资源（悬挂引用）或无法解析的模式文本 → 跳过（fail-closed，不投影）。
+    let mut modes: BTreeMap<Option<ResourceCode>, Mode> = BTreeMap::new();
+    for row in &mode_rows {
+        let Some(mode) = parse_mode(&row.mode) else {
+            continue; // 未知模式文本 → 不投影
+        };
+        let scope: Option<ResourceCode> = match row.scope_resource_id {
+            None => None, // 全局
+            Some(rid) => match resources.get(&rid) {
+                Some(code) => Some(code.clone()),
+                None => continue, // 指向不可见资源 → 悬挂引用，跳过
+            },
+        };
+        modes
+            .entry(scope)
+            .and_modify(|existing| *existing = existing.meet(mode))
+            .or_insert(mode);
+    }
+
     Ok(PolicySnapshot {
         policy_rev,
         grants,
@@ -198,6 +229,7 @@ pub fn build_snapshot(db: &Db, policy_rev: u64) -> Result<PolicySnapshot, StoreE
         credentials,
         deny_notes,
         grantable,
+        modes,
     })
 }
 
@@ -437,6 +469,19 @@ fn load_conditions(db: &Db) -> Result<Vec<ConditionRow>, StoreError> {
     })
 }
 
+fn load_mode_state(db: &Db) -> Result<Vec<ModeRow>, StoreError> {
+    // 限制性表：仅 delete_flag = 0（绝不引入 enable_flag 过滤，否则解冻 fail-open）。
+    // scope_resource_id 可空（NULL = 全局模式）。
+    let select = "SELECT scope_resource_id, mode FROM mode_state \
+                  WHERE delete_flag = 0 ORDER BY id LIMIT ?1 OFFSET ?2";
+    load_paged(db, select, |r| {
+        Ok(ModeRow {
+            scope_resource_id: get_opt_i64(r, 0)?,
+            mode: get_text(r, 1)?,
+        })
+    })
+}
+
 // ============================================================ 角色继承展开
 
 /// 沿 `role_inherits` 求每个角色的有效动词传递闭包（含自身 + 全部祖先的动词）。
@@ -646,6 +691,17 @@ fn action_of(text: &str) -> Option<GrantAction> {
     match text {
         "allow" => Some(GrantAction::Allow),
         "escalate" => Some(GrantAction::Escalate),
+        _ => None,
+    }
+}
+
+/// 4 模式文本 → [`Mode`]，未知 → `None`（fail-closed，不投影该辖区模式）。
+fn parse_mode(text: &str) -> Option<Mode> {
+    match text {
+        "normal" => Some(Mode::Normal),
+        "observe" => Some(Mode::Observe),
+        "maintain" => Some(Mode::Maintain),
+        "freeze" => Some(Mode::Freeze),
         _ => None,
     }
 }

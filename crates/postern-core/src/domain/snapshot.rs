@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use super::{Capability, CredentialTier, GrantCell, PrincipalId, ResourceCode, Timestamp};
+use super::{Capability, CredentialTier, GrantCell, Mode, PrincipalId, ResourceCode, Timestamp};
 
 /// Tier declaration for one resource: which verbs this engine-account
 /// credential tier carries. Declaring tiers is the policy state's job;
@@ -72,4 +72,12 @@ pub struct PolicySnapshot {
     /// Grantable capability set per resource - the mechanical source of
     /// `request_hint`; a verb absent here yields `request_hint = None`.
     pub grantable: BTreeMap<ResourceCode, Vec<Capability>>,
+    /// Jurisdiction operating modes (the kill-switch posture). Keyed by
+    /// `None` for the global mode and `Some(resource)` for a per-resource
+    /// override; the store records each jurisdiction's mode verbatim and the
+    /// evaluator takes the strictest (`Mode::meet`) of the global and the
+    /// requested resource. The empty map is "no override anywhere" - every
+    /// jurisdiction is `Normal` (mode imposes no restriction), so the
+    /// `Default` (empty) snapshot does not constrain RBAC.
+    pub modes: BTreeMap<Option<ResourceCode>, Mode>,
 }

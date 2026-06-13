@@ -920,6 +920,7 @@ fn allow_snapshot(p: PrincipalId, capability: Capability, tier: &str) -> PolicyS
         },
         deny_notes: BTreeMap::new(),
         grantable: BTreeMap::new(),
+        modes: BTreeMap::new(),
     }
 }
 

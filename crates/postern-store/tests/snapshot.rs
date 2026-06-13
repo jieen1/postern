@@ -18,7 +18,7 @@
 use std::sync::Arc;
 
 use postern_core::domain::{
-    Capability, GrantAction, PolicySnapshot, PrincipalId, ResourceCode, Role, Timestamp,
+    Capability, GrantAction, Mode, PolicySnapshot, PrincipalId, ResourceCode, Role, Timestamp,
 };
 use postern_core::id::{Clock, IdGen, SnowflakeId};
 use postern_core::plugin::PolicyView;
@@ -241,6 +241,31 @@ fn seed_deny_note(db: &Db, g: &IdGen, resource: SnowflakeId, capability: &str, n
             Value::Text(note.into()),
         ],
     );
+}
+
+/// 一条全局辖区运行模式（`scope_resource_id` 为 NULL = 全局），返回新行 id。
+fn seed_global_mode(db: &Db, g: &IdGen, mode: &str) -> SnowflakeId {
+    seed(
+        db,
+        g,
+        "mode_state",
+        vec!["scope_resource_id", "mode"],
+        vec![Value::Null, Value::Text(mode.into())],
+    )
+}
+
+/// 一条资源级辖区运行模式（`scope_resource_id` 挂到一个具体资源），返回新行 id。
+fn seed_resource_mode(db: &Db, g: &IdGen, resource: SnowflakeId, mode: &str) -> SnowflakeId {
+    seed(
+        db,
+        g,
+        "mode_state",
+        vec!["scope_resource_id", "mode"],
+        vec![
+            Value::Integer(resource.as_raw() as i64),
+            Value::Text(mode.into()),
+        ],
+    )
 }
 
 fn seed_tier(db: &Db, g: &IdGen, resource: SnowflakeId, tier: &str, capabilities: &str) {
@@ -884,5 +909,124 @@ fn view_snapshot_is_a_shared_clone_not_a_deep_copy() {
     assert!(
         Arc::ptr_eq(&a, &b),
         "two reads between rebuilds share the same underlying Arc (lock-free clone, no deep copy)"
+    );
+}
+
+// ============================================================ mode_state → snapshot.modes
+// 失控切断（observe/maintain/freeze）：mode_state 行 → snapshot.modes 物化。
+// 全局行（scope_resource_id NULL）→ modes[None]、资源行 → modes[Some(resource)]；
+// meet 计算在 evaluator/core，本单元只断言 store 如实存各辖区 mode。
+
+#[test]
+fn build_materializes_global_mode_row_into_modes_none_key() {
+    // 全局 mode_state 行（scope_resource_id NULL）→ snapshot.modes[None]。
+    let db = migrated_db();
+    let g = idgen();
+    seed_global_mode(&db, &g, "freeze");
+
+    let snap = build_snapshot(&db, 1).expect("builds");
+    assert_eq!(
+        snap.modes.get(&None).copied(),
+        Some(Mode::Freeze),
+        "a global mode_state row materializes at the None (global) key"
+    );
+}
+
+#[test]
+fn build_materializes_resource_mode_row_into_modes_some_key() {
+    // 资源级 mode_state 行（scope_resource_id 指向资源）→ snapshot.modes[Some(resource)]。
+    let db = migrated_db();
+    let g = idgen();
+    let res = seed_resource(&db, &g, "db-main");
+    seed_resource_mode(&db, &g, res, "observe");
+
+    let snap = build_snapshot(&db, 1).expect("builds");
+    assert_eq!(
+        snap.modes.get(&Some(ResourceCode::new("db-main"))).copied(),
+        Some(Mode::Observe),
+        "a resource-scoped mode_state row materializes at the Some(resource) key"
+    );
+}
+
+#[test]
+fn build_materializes_global_and_resource_modes_side_by_side() {
+    // 全局行与资源行并存：各自落自己的键，互不覆盖（meet 留给 evaluator）。
+    let db = migrated_db();
+    let g = idgen();
+    // 先播一行占掉首个 id（首个雪花在本固定时钟下原始值为 0），使 resource 取非零
+    // id——否则资源行 COALESCE(scope_resource_id,0)=0 会与全局行（NULL→0）撞唯一索引。
+    seed_principal(&db, &g, "agent-pad");
+    let res = seed_resource(&db, &g, "db-main");
+    seed_global_mode(&db, &g, "maintain");
+    seed_resource_mode(&db, &g, res, "freeze");
+
+    let snap = build_snapshot(&db, 1).expect("builds");
+    assert_eq!(
+        snap.modes.get(&None).copied(),
+        Some(Mode::Maintain),
+        "global mode stored verbatim at None"
+    );
+    assert_eq!(
+        snap.modes.get(&Some(ResourceCode::new("db-main"))).copied(),
+        Some(Mode::Freeze),
+        "resource mode stored verbatim at Some(resource) — store does not compute meet"
+    );
+}
+
+#[test]
+fn build_on_db_with_no_mode_state_yields_empty_modes() {
+    // 无 mode_state 行 → snapshot.modes 为空（各处 Normal，mode 不设限）。
+    let db = migrated_db();
+    let snap = build_snapshot(&db, 1).expect("builds");
+    assert!(
+        snap.modes.is_empty(),
+        "no mode_state rows → empty modes map (every jurisdiction is Normal)"
+    );
+}
+
+#[test]
+fn build_excludes_logically_deleted_mode_state_row() {
+    // §8-二L-2b / §3.4：mode_state 是限制性表，仅按 delete_flag=0 加载——逻辑删除的
+    // mode 行不再出现在 snapshot.modes（解冻即生效，不被 enable_flag 谓词遮蔽）。
+    let db = migrated_db();
+    let g = idgen();
+    let res = seed_resource(&db, &g, "db-main");
+    let row = seed_resource_mode(&db, &g, res, "freeze");
+    db.with_write_txn(|txn| {
+        write::logical_delete(txn, now(), &Actor::System, "mode_state", row, 0)
+    })
+    .expect("logical delete the resource mode row");
+    assert_eq!(
+        count_where(&db, "mode_state", "delete_flag = 1"),
+        1,
+        "the resource mode row is logically removed (delete_flag=1)"
+    );
+
+    let snap = build_snapshot(&db, 1).expect("builds");
+    assert!(
+        !snap.modes.contains_key(&Some(ResourceCode::new("db-main"))),
+        "a logically-removed mode_state row must not appear in snapshot.modes"
+    );
+}
+
+#[test]
+fn build_excludes_mode_row_pointing_at_an_invisible_resource() {
+    // 悬挂引用：mode 行的 scope_resource_id 指向已逻辑删除（不可见）的资源 → 不投影。
+    // 用合法写路径建资源后逻辑删除它（父行不可见），子 mode 行残留 → fail-closed 跳过。
+    let db = migrated_db();
+    let g = idgen();
+    let res = seed_resource(&db, &g, "db-gone");
+    seed_resource_mode(&db, &g, res, "freeze");
+    db.with_write_txn(|txn| {
+        write::logical_delete(txn, now(), &Actor::System, "resources", res, 0)
+    })
+    .expect("logical delete the resource (parent now invisible)");
+
+    let snap = build_snapshot(&db, 1).expect("builds");
+    assert!(
+        !snap
+            .modes
+            .contains_key(&Some(ResourceCode::new("db-gone"))),
+        "a mode row scoped to an invisible (dangling) resource is not projected (fail-closed)"
     );
 }

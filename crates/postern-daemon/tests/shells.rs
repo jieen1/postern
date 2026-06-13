@@ -359,6 +359,7 @@ fn allow_snapshot(p: PrincipalId, capability: Capability) -> PolicySnapshot {
         },
         deny_notes: BTreeMap::new(),
         grantable: BTreeMap::new(),
+        modes: BTreeMap::new(),
     }
 }
 

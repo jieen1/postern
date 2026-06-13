@@ -407,6 +407,7 @@ fn allow_snapshot(p: PrincipalId, capability: Capability, tier: &str) -> PolicyS
         },
         deny_notes: BTreeMap::new(),
         grantable: BTreeMap::new(),
+        modes: BTreeMap::new(),
     }
 }
 
@@ -1238,6 +1239,7 @@ async fn escalate_with_approval_closed_folds_to_deny_never_suspends() {
         },
         deny_notes: BTreeMap::new(),
         grantable: BTreeMap::new(),
+        modes: BTreeMap::new(),
     });
     let auth = FakeAuth {
         kind: AUTH_KIND,

@@ -1403,7 +1403,8 @@ fn test_eval_context_field_set_pins_the_explicit_inputs_only() {
 fn test_policy_snapshot_default_is_the_empty_deny_world_with_the_design_field_set() {
     // §8-一F-1: exhaustive destructuring compile-pins the snapshot field
     // set (grant index, tier declarations, credential view, deny notes,
-    // grantable set, policy_rev); the default value grants nothing.
+    // grantable set, jurisdiction modes, policy_rev); the default value
+    // grants nothing and imposes no mode restriction.
     let PolicySnapshot {
         policy_rev,
         grants,
@@ -1411,6 +1412,7 @@ fn test_policy_snapshot_default_is_the_empty_deny_world_with_the_design_field_se
         credentials,
         deny_notes,
         grantable,
+        modes,
     } = PolicySnapshot::default();
     assert_eq!(policy_rev, 0);
     assert_eq!(grants.len(), 0, "empty snapshot grants nothing (axiom one)");
@@ -1419,6 +1421,11 @@ fn test_policy_snapshot_default_is_the_empty_deny_world_with_the_design_field_se
     assert_eq!(credentials.credentials.len(), 0);
     assert_eq!(deny_notes.len(), 0);
     assert_eq!(grantable.len(), 0);
+    assert_eq!(
+        modes.len(),
+        0,
+        "empty snapshot has no mode override -> every jurisdiction is Normal"
+    );
 }
 
 #[test]

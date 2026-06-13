@@ -121,6 +121,23 @@ impl Evaluator {
         }
         trace.push(Stage::Constraint, "constraint check passed");
 
+        // [5] 模式谓词（失控切断的安全特性）：先求本资源的有效模式 = 全局模式与
+        //     资源级模式取最严（meet，严格度 Freeze > Observe > Maintain > Normal）；
+        //     两处皆无覆盖 → Normal（mode 不设限）。请求动词不在有效模式放行集内即
+        //     Deny（fail-closed，落 condition 阶）——即便已命中授权格、细则已过。
+        let mode = self.effective_mode(policy, &req.resource);
+        if !mode.allows(ci.capability) {
+            trace.push(
+                Stage::Condition,
+                format!(
+                    "jurisdiction mode '{}' bars capability '{}'",
+                    mode_name(mode),
+                    ci.capability.as_str()
+                ),
+            );
+            return deny(trace, policy, principal, req, ci);
+        }
+
         // [5] 条件谓词：逐一求值；未注册 / 解析失败 / Ok(false) / Err 均 → Deny。
         let ctx = EvalContext {
             principal,
@@ -128,8 +145,9 @@ impl Evaluator {
             capability: ci.capability,
             objects: ci.objects.clone(),
             now,
-            // mode 取自快照事实；快照不携带模式覆盖时即 Normal（确定性）。
-            mode: Mode::Normal,
+            // mode 取自快照事实（全局与资源级取最严的有效模式）；快照不携带任何
+            // 模式覆盖时即 Normal（确定性）。
+            mode,
         };
         for condition in &cell.conditions {
             // detail 援引谓词 kind（策略事实，代号类内容），绝不援引 spec 原文。
@@ -239,6 +257,22 @@ impl Evaluator {
         }
     }
 
+    /// [5] 求某资源的有效模式：全局模式（`modes[None]`）与资源级模式
+    /// （`modes[Some(resource)]`）取最严（`Mode::meet`）。两处皆无覆盖 →
+    /// `Mode::Normal`（mode 不设限）。store 只如实存各辖区模式，最严计算在此
+    /// （core），确保确定性。
+    fn effective_mode(&self, policy: &PolicySnapshot, resource: &ResourceCode) -> Mode {
+        let global = match policy.modes.get(&None) {
+            Some(m) => *m,
+            None => Mode::Normal,
+        };
+        let scoped = match policy.modes.get(&Some(resource.clone())) {
+            Some(m) => *m,
+            None => Mode::Normal,
+        };
+        global.meet(scoped)
+    }
+
     /// [6] tier 选择：在 `policy.tiers[resource]` 找承载该动词的 `TierDecl`。
     /// resource 无声明或无任一承载 → `None`（不退默认 tier）。
     fn select_tier<'p>(
@@ -258,6 +292,16 @@ impl Evaluator {
 /// 认证阶段拒时 `your_grants` 退化为空集合（fail-closed，不泄露存在性）。
 fn unauthenticated() -> PrincipalId {
     PrincipalId::new(SnowflakeId::from_raw(0))
+}
+
+/// 模式名（代号类策略事实，供 mode 拒绝轨迹 detail 援引）。穷举匹配，无 `_` 兜底。
+fn mode_name(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Normal => "normal",
+        Mode::Observe => "observe",
+        Mode::Maintain => "maintain",
+        Mode::Freeze => "freeze",
+    }
 }
 
 /// 拒绝路径统一出口：消费轨迹累积器，据截止步与请求事实组装 `DenyResponse`，

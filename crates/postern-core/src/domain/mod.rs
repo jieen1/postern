@@ -110,19 +110,90 @@ pub enum Scope {
     Selector(String),
 }
 
-/// Jurisdiction operating mode. `Ord` is strictness, ascending:
-/// `Normal < Observe < Maintain < Freeze` - when several modes apply,
-/// taking the maximum takes the strictest (never the loosest).
+/// Jurisdiction operating mode (the kill-switch posture).
+///
+/// Strictness, by pass-set inclusion, is `Normal < Maintain < Observe <
+/// Freeze` (technical design 643 / detailed design 377-380): `Observe` is
+/// read-only (only `{Observe, Query}`), so it is STRICTER than `Maintain`
+/// (which also admits `{Mutate, Execute}`); `Freeze` admits nothing and is
+/// strictest. When several modes apply to one request the effective mode is
+/// the strictest ([`Mode::meet`]) - never the loosest (L-10 "same
+/// jurisdiction, multiple modes -> strictest").
+///
+/// NOTE: this strictness order is NOT the derived `Ord` (which follows the
+/// variant declaration order `Normal < Observe < Maintain < Freeze`); the
+/// variant order is kept only for a stable total order on the enum.
+/// [`Mode::meet`] therefore ranks strictness explicitly rather than relying
+/// on `Ord`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Mode {
-    /// Normal operation.
+    /// Normal operation: no mode restriction (RBAC governs).
     Normal,
-    /// Read-only posture.
+    /// Read-only posture: only the read verbs (`Observe`, `Query`) pass.
     Observe,
-    /// Maintenance posture.
+    /// Maintenance posture: read verbs plus controlled `Mutate` / `Execute`
+    /// (deliberately NOT `Manage` / `Destroy`).
     Maintain,
-    /// Everything denied.
+    /// Frozen: every verb is denied.
     Freeze,
+}
+
+impl Mode {
+    /// Whether `cap` is in this mode's pass set (the mode override admits it).
+    /// Mode never *grants* - it can only further restrict what RBAC allows -
+    /// so `Normal` admits everything and the lattice narrows from there.
+    ///
+    /// Exhaustive per-(mode, cap) match; no `_ =>` catch-all on `cap` for the
+    /// restrictive modes, so a new verb forces a deliberate decision here
+    /// (fail-closed by construction).
+    pub fn allows(self, cap: Capability) -> bool {
+        match self {
+            // Normal: mode imposes no restriction; RBAC is the sole arbiter.
+            Mode::Normal => true,
+            // Observe: read-only - only the two read verbs.
+            Mode::Observe => matches!(cap, Capability::Observe | Capability::Query),
+            // Maintain: read verbs plus controlled mutate/execute; manage and
+            // destroy stay denied even under maintenance.
+            Mode::Maintain => matches!(
+                cap,
+                Capability::Observe
+                    | Capability::Query
+                    | Capability::Mutate
+                    | Capability::Execute
+            ),
+            // Freeze: nothing passes.
+            Mode::Freeze => false,
+        }
+    }
+
+    /// The stricter (meet) of two modes - the effective mode when several
+    /// apply to the same request (e.g. a global mode and a resource-level
+    /// override). Strictness is `Normal < Maintain < Observe < Freeze` by
+    /// pass-set inclusion, so the meet keeps the higher-ranked (never the
+    /// loosest). Idempotent and commutative.
+    pub fn meet(self, other: Mode) -> Mode {
+        if self.strictness() >= other.strictness() {
+            self
+        } else {
+            other
+        }
+    }
+
+    /// Explicit strictness rank (higher = stricter), by pass-set inclusion:
+    /// `Normal` (admits all) < `Maintain` (4 verbs) < `Observe` (2 verbs) <
+    /// `Freeze` (none). Deliberately NOT the derived `Ord` (variant order),
+    /// since `Observe` is read-only and thus stricter than `Maintain`.
+    ///
+    /// Exhaustive per-variant match; no `_ =>` arm, so a new mode forces a
+    /// deliberate rank here.
+    fn strictness(self) -> u8 {
+        match self {
+            Mode::Normal => 0,
+            Mode::Maintain => 1,
+            Mode::Observe => 2,
+            Mode::Freeze => 3,
+        }
+    }
 }
 
 /// Wall-clock instant as milliseconds since the Unix epoch. Evaluation
