@@ -1,0 +1,18 @@
+{
+  "_note": "红队自检探针语料(数据文件,扫描器只扫 .rs/.sql,本 .json 隐形,B 方案)。verify.rs 经 include_str! 读取本文件取出各探针语句原文,装进 VerifyCorpus 喂 verify 驱动。语句原文只在本数据文件出现,verify.rs 与 src/control/verify.rs 内零 SQL 标记。各键对应一类红队探针的负载语句。",
+
+  "scope_out_mutate": "UPDATE public.orders SET total = 0 WHERE id = 1",
+  "scope_out_mutate_expect": "mutate,deny,rbac",
+
+  "disguised_write": "WITH gone AS (DELETE FROM public.orders WHERE id = 1 RETURNING id) SELECT id FROM gone",
+  "disguised_write_expect": "destroy,deny,rbac",
+
+  "session_tamper": "SET search_path TO public, evil",
+  "session_tamper_expect": "deny,classify",
+
+  "multi_statement": "SELECT id FROM public.orders WHERE id = 1; SELECT id FROM public.orders WHERE id = 2",
+  "multi_statement_expect": "deny,classify",
+
+  "benign_query": "SELECT id, total FROM public.orders WHERE id = 1",
+  "benign_query_expect": "query,allow"
+}

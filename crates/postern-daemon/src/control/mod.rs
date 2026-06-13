@@ -28,6 +28,7 @@ pub mod approvals;
 pub mod auth;
 pub mod endpoints;
 pub mod router;
+pub mod verify;
 
 use std::sync::Arc;
 

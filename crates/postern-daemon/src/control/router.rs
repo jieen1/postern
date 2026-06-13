@@ -13,9 +13,12 @@
 //! 装配：逐条挂载 [`CONTROL_ROUTES`]（恰覆盖 §6.5），注入集合 = [`ControlState`]
 //! （PolicyRepo + Enrollment + AuditSink，绝无连接池 / Sanitizer，红线 7.2-2）。
 
-use axum::routing::{get, post, MethodRouter};
-use axum::Router;
+use std::sync::Arc;
 
+use axum::routing::{get, post, MethodRouter};
+use axum::{Json, Router};
+
+use super::verify::{VerifyReport, VerifyRunner};
 use super::ControlState;
 
 /// 控制面 router 暴露的全部路由路径**恰为** §6.5 端点集（路径常量表）。
@@ -97,4 +100,26 @@ pub fn router(state: ControlState) -> Router {
 /// 仅用于让控制面 router 在装配点"恰覆盖" §6.5；不做任何安全决策、不触后端。
 async fn stub_handler() -> axum::http::StatusCode {
     axum::http::StatusCode::NOT_IMPLEMENTED
+}
+
+/// 把 `POST /v1/verify` 路由接到一个真实的红队自检 runner（红队自检的路由落地）。
+///
+/// 控制面注入集合（[`ControlState`]）**绝无** Kernel（红线 7.2-2）——故 verify 路由不从
+/// ControlState 取求值入口，而是经注入的 [`VerifyRunner`] 触发：boot 在**数据面侧**装配一个持有
+/// 数据面 [`Kernel`] + verify 临时低权材料的具体 runner，经本函数把它**覆盖**到 [`router`] 已挂
+/// 的 `/v1/verify` 占位 handler 上（`.route` 同 path 以后挂者为准），使该路由真实可达（非 501）。
+///
+/// 本函数刻意**不**改 [`router`] 签名 / [`ControlState`] 类型——runner 持有 Kernel，绝不进
+/// ControlState 的注入集合，红线 7.2-2 在编译期不退化。verify 报告以 `Json<VerifyReport>` 回出
+/// （逐条 PASS/FAIL + all_pass，供 CLI / SPA 渲染）。
+pub fn mount_verify(base: Router, runner: Arc<dyn VerifyRunner>) -> Router {
+    base.route("/v1/verify", post(verify_handler))
+        .layer(axum::Extension(runner))
+}
+
+/// `POST /v1/verify` 真实处理器：触发注入的红队自检 runner，回逐条报告（`Json<VerifyReport>`）。
+async fn verify_handler(
+    axum::Extension(runner): axum::Extension<Arc<dyn VerifyRunner>>,
+) -> Json<VerifyReport> {
+    Json(runner.run().await)
 }
