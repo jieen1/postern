@@ -3,6 +3,11 @@ name = "postern-daemon"
 version = "0.1.0"
 edition = "2021"
 
+# 依赖纪律（模块文档 06 §6 / 编排白名单）：daemon 是依赖图唯一可依赖全部下游库的
+# 组装点，path 依赖全部 6 个 workspace crate（cli 一般不需，按需引入）。外部依赖限于
+# tokio / axum / hyper / tower / rmcp / hyperlocal / tracing / serde / thiserror，
+# anyhow 仅 main.rs（[dependencies] 声明，但只在 main.rs use）。封禁 uuid/ulid 等 id 库
+# 与 rusqlite/sqlparser（daemon 不直接碰 DB，经 store）。
 [dependencies]
 postern-core = { path = "../postern-core" }
 postern-store = { path = "../postern-store" }
@@ -10,6 +15,62 @@ postern-secrets = { path = "../postern-secrets" }
 postern-transports = { path = "../postern-transports" }
 postern-adapters = { path = "../postern-adapters" }
 
+# 全异步运行时：数据面/控制面外壳、连接池、周期清扫均跑在 multi-thread 上；同步 store /
+# AuditSink 调用走 spawn_blocking 边界（§5）。
+tokio = { version = "1", features = ["full"] }
+# data.sock 外壳服务端（§8.12）与 control.sock 控制面 router（§8.10）。
+axum = "0.7"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server"] }
+# CatchPanic 等中间件（panic 不外泄、fail-closed）。
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["catch-panic"] }
+# 结构化日志。
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# 请求/响应 DTO 序列化往返。
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# 本 crate 错误词汇基底。
+thiserror = "2"
+# 仅 main.rs 顶层错误聚合（白名单约束：anyhow 仅 main.rs）。
+anyhow = "1"
+
+# 二进制组装点：posternd（data.sock 数据面 + control.sock 控制面）。
 [[bin]]
 name = "posternd"
 path = "src/main.rs"
+
+# error-mapping 单元：DaemonError 词汇 + DownstreamError -> Stage 穷尽映射 +
+# OutcomeDegraded 出口码（§8 L-3/L-5/L-6）。
+[[test]]
+name = "error-mapping"
+path = "tests/error_mapping.rs"
+
+# sanitize 单元：出口脱敏器（Sanitizer/StreamScrubber 的 daemon 实现）行为测试。
+[[test]]
+name = "sanitize"
+path = "tests/sanitize.rs"
+
+# shells-http-mcp 单元：数据面外壳（HTTP/MCP 共挂 data.sock）行为测试——ConnOrigin 唯一
+# 构造点、HTTP/MCP NormalizedRequest 字节等价、固定动词工具面、postern_surface 快照投影
+# 不触后端、协议非法 4xx 仍过同一 Sanitizer（§8 F-4/F-5/F-10、L-4、B-2）。
+[[test]]
+name = "shells-http-mcp"
+path = "tests/shells.rs"
+
+# assembly-main 单元：进程级唯一组装点行为测试——boot 装配产物接线为三平面独立 spawn
+# （数据面/控制面 router + sweeper 周期任务）、boot Err → 非零进程退出码 + data.sock 不
+# serving、句柄分流红线 7.2-2 的进程级见证、已装配状态经 Kernel 端到端求值（§8 DoD 载体）。
+[[test]]
+name = "assembly-main"
+path = "tests/assembly.rs"
+
+[dev-dependencies]
+postern-core = { path = "../postern-core" }
+postern-secrets = { path = "../postern-secrets" }
+# 仅测试用：以 #[async_trait] 实现 core 的 Adapter/Transport Fake（与下游 crate 定义
+# 这些 trait 时同一脱糖宏；非禁用 id/SQL 库，已在 workspace 锁内）。
+async-trait = "0.1"
+# 测试夹具用 Zeroizing 喂 Payload::from_plaintext 以构造真实 ScrubSet 句柄（机密面 API）。
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
