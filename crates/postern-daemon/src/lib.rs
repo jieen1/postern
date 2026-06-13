@@ -20,6 +20,7 @@ pub mod boot;
 pub mod connpool;
 pub mod control;
 pub mod error;
+pub mod identity;
 pub mod kernel;
 pub mod registry;
 pub mod sanitize;

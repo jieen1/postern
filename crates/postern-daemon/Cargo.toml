@@ -35,6 +35,10 @@ serde_json = "1.0"
 thiserror = "2"
 # 仅 main.rs 顶层错误聚合（白名单约束：anyhow 仅 main.rs）。
 anyhow = "1"
+# 身份与凭证域 8.4：api_key/token 认证器以 argon2id verify presented secret against
+# 凭据 secret_hash（PHC 串）；非 id/SQL 库，不在任何契约封禁名单（与 secrets crate 同
+# argon2 0.5，已在 workspace lock 内）。
+argon2 = "0.5"
 
 # 二进制组装点：posternd（data.sock 数据面 + control.sock 控制面）。
 [[bin]]
