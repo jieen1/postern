@@ -1,0 +1,201 @@
+{
+  "_note": "postgres classify 归类语料（§8: F-2~F-5, L-1~L-5, L-16）。每条 case: { name, sql, expect[, objects] } —— expect 为期望档名(observe/query/mutate/destroy)或期望错误(err_parse/err_multi/err_unknown/err_unclassifiable)。测试 load -> for case -> classify(case.sql) -> assert 恰为 case.expect（档错绝不互换、写绝不降级、解析失败 fail-closed）。SQL 文本作数据放此处（扫描器只扫 .rs/.sql，数据文件隐形，B 方案）。可选 objects 钉死对象提取与定档同遍历看到一致对象视图（去重稳定排序后逐字段相等）。",
+  "cases": [
+    {
+      "name": "F2_pure_read_select",
+      "_doc": "§8 F-2：纯只读 SELECT 无 INTO 顶层 Query、无写节点 → Ok(query)（Read 基线映射 Capability::Query），objects=[schema.table]",
+      "sql": "SELECT id, total FROM public.orders WHERE id = 1",
+      "expect": "query",
+      "objects": ["public.orders"]
+    },
+    {
+      "name": "F2_read_join_two_tables",
+      "_doc": "§8 F-2：多表只读连接仍 query；对象集恰为两表（同遍历提取，去重稳定排序）",
+      "sql": "SELECT o.id FROM public.orders o JOIN public.customers c ON c.id = o.customer_id",
+      "expect": "query",
+      "objects": ["public.customers", "public.orders"]
+    },
+    {
+      "name": "F2_read_subquery_no_write",
+      "_doc": "§8 F-2：只读子查询嵌套仍 query（子查询里无写节点，绝不误升）；对象集含外层与子查询两表",
+      "sql": "SELECT id FROM public.orders WHERE customer_id IN (SELECT id FROM public.customers)",
+      "expect": "query",
+      "objects": ["public.customers", "public.orders"]
+    },
+    {
+      "name": "F3_insert_mutate",
+      "_doc": "§8 F-3：Insert → Ok(mutate)（写但非删除/删表/清表）",
+      "sql": "INSERT INTO public.orders (id, total) VALUES (1, 9)",
+      "expect": "mutate",
+      "objects": ["public.orders"]
+    },
+    {
+      "name": "F3_update_mutate",
+      "_doc": "§8 F-3：Update → Ok(mutate)",
+      "sql": "UPDATE public.orders SET total = 0 WHERE id = 1",
+      "expect": "mutate",
+      "objects": ["public.orders"]
+    },
+    {
+      "name": "F3_merge_mutate",
+      "_doc": "§8 F-3：Merge → Ok(mutate)（写但非删除类，绝不升 destroy）",
+      "sql": "MERGE INTO public.orders t USING public.staging s ON t.id = s.id WHEN MATCHED THEN UPDATE SET total = s.total",
+      "expect": "mutate"
+    },
+    {
+      "name": "F3_insert_from_select_source_collected",
+      "_doc": "§8 F-3：INSERT..SELECT 源 → mutate（顶层写定 mutate；源只读不提升），对象含目标与源",
+      "sql": "INSERT INTO public.orders (id, total) SELECT id, total FROM public.staging",
+      "expect": "mutate",
+      "objects": ["public.orders", "public.staging"]
+    },
+    {
+      "name": "F4_delete_destroy_toplevel",
+      "_doc": "§8 F-4：Delete → Ok(destroy)（最高危，顶层即 Destroy，绝不降 Mutate）",
+      "sql": "DELETE FROM public.orders WHERE id = 1",
+      "expect": "destroy",
+      "objects": ["public.orders"]
+    },
+    {
+      "name": "F4_drop_destroy",
+      "_doc": "§8 F-4：Drop → Ok(destroy)",
+      "sql": "DROP TABLE public.orders",
+      "expect": "destroy"
+    },
+    {
+      "name": "F4_truncate_destroy",
+      "_doc": "§8 F-4：Truncate → Ok(destroy)",
+      "sql": "TRUNCATE TABLE public.orders",
+      "expect": "destroy"
+    },
+    {
+      "name": "F5_observe_show",
+      "_doc": "§8 F-5：Show → Ok(observe)（只读元信息观测）",
+      "sql": "SHOW search_path",
+      "expect": "observe"
+    },
+    {
+      "name": "F5_observe_explain_plain_nonanalyze",
+      "_doc": "§8 F-5：Explain(非 ANALYZE) → Ok(observe)（被解释语句只读、不真实执行）",
+      "sql": "EXPLAIN SELECT id FROM public.orders WHERE id = 1",
+      "expect": "observe"
+    },
+    {
+      "name": "L1_cte_delete_no_downgrade_destroy",
+      "_doc": "§8 L-1：WITH x AS (DELETE...) SELECT... → Ok(destroy)，绝不 Query/Mutate（顶层只读 Query 包裹写，穿透提升到 destroy 永不下调）",
+      "sql": "WITH gone AS (DELETE FROM public.orders WHERE id = 1 RETURNING id) SELECT id FROM gone",
+      "expect": "destroy"
+    },
+    {
+      "name": "L1_cte_update_no_downgrade_mutate",
+      "_doc": "§8 L-1：WITH x AS (UPDATE...) SELECT... → Ok(mutate)，绝不降 query（CTE 体内写 SetExpr::Update(Statement) 穿透提升）",
+      "sql": "WITH bumped AS (UPDATE public.orders SET total = total + 1 RETURNING id) SELECT id FROM bumped",
+      "expect": "mutate"
+    },
+    {
+      "name": "L2_subquery_insert_no_downgrade_mutate",
+      "_doc": "§8 L-2：子查询/CTE 藏 INSERT，顶层 Query 包裹 → 穿透提升到 mutate，绝不降级 query",
+      "sql": "WITH ins AS (INSERT INTO public.orders (id, total) VALUES (1, 9) RETURNING id) SELECT id FROM ins",
+      "expect": "mutate"
+    },
+    {
+      "name": "L2_subquery_delete_no_downgrade_destroy",
+      "_doc": "§8 L-2：子查询藏 DELETE → Ok(destroy)（子查询藏 DELETE/DROP/TRUNCATE 一律穿透提升到 destroy）",
+      "sql": "WITH g AS (DELETE FROM public.staging WHERE id = 1 RETURNING id) SELECT g.id FROM g JOIN public.orders o ON o.id = g.id",
+      "expect": "destroy"
+    },
+    {
+      "name": "L4_explain_analyze_delete_inner_destroy",
+      "_doc": "§8 L-4：EXPLAIN ANALYZE DELETE → Ok(destroy)（真实执行，按内部最高危写定档，非 observe）",
+      "sql": "EXPLAIN ANALYZE DELETE FROM public.orders WHERE id = 1",
+      "expect": "destroy"
+    },
+    {
+      "name": "L4_explain_analyze_insert_inner_mutate",
+      "_doc": "§8 L-4：EXPLAIN ANALYZE INSERT → Ok(mutate)（真实执行，按内部写定档）",
+      "sql": "EXPLAIN ANALYZE INSERT INTO public.orders (id, total) VALUES (1, 9)",
+      "expect": "mutate"
+    },
+    {
+      "name": "L4_explain_paren_analyze_delete_inner_destroy",
+      "_doc": "§8 L-4：括号选项形 EXPLAIN (ANALYZE) DELETE → Ok(destroy)。0.57 把括号内 ANALYZE 解析进 options 向量（UtilityOption{name:ANALYZE, arg:None}）而非 analyze 布尔，仍真实执行被解释语句、须下探按内部最高危定档，绝不降为 observe（伪装写降级钉死）",
+      "sql": "EXPLAIN (ANALYZE) DELETE FROM public.orders WHERE id = 1",
+      "expect": "destroy",
+      "objects": ["public.orders"]
+    },
+    {
+      "name": "L4_explain_paren_analyze_true_update_inner_mutate",
+      "_doc": "§8 L-4：括号形带真值实参 EXPLAIN (ANALYZE TRUE) UPDATE → Ok(mutate)（ANALYZE 显式真 → 执行 → 下探内部写定 mutate，绝不 observe）",
+      "sql": "EXPLAIN (ANALYZE TRUE) UPDATE public.orders SET total = 0 WHERE id = 1",
+      "expect": "mutate",
+      "objects": ["public.orders"]
+    },
+    {
+      "name": "L4_explain_paren_analyze_verbose_delete_inner_destroy",
+      "_doc": "§8 L-4：多选项括号形 EXPLAIN (ANALYZE, VERBOSE) DELETE → Ok(destroy)（ANALYZE 与其它选项共存仍执行 → 下探定 destroy）",
+      "sql": "EXPLAIN (ANALYZE, VERBOSE) DELETE FROM public.orders WHERE id = 1",
+      "expect": "destroy",
+      "objects": ["public.orders"]
+    },
+    {
+      "name": "L4_explain_paren_analyze_false_delete_observe",
+      "_doc": "§8 L-4 边界：EXPLAIN (ANALYZE FALSE) DELETE → Ok(observe)。ANALYZE 显式置假 = 只展示计划不执行（PostgreSQL 语义），归只读观测档恰为 observe；钉死『仅 ANALYZE 未显式禁用才执行』的判据，防过度提升把纯计划展示误升危档",
+      "sql": "EXPLAIN (ANALYZE FALSE) DELETE FROM public.orders WHERE id = 1",
+      "expect": "observe"
+    },
+    {
+      "name": "L4_explain_paren_format_json_delete_observe",
+      "_doc": "§8 L-4 边界：EXPLAIN (FORMAT JSON) DELETE → Ok(observe)。无 ANALYZE 选项 = 不执行、纯计划展示，归 observe；钉死『括号形只在出现 ANALYZE 选项时才下探』，非 ANALYZE 的括号选项不触发执行语义",
+      "sql": "EXPLAIN (FORMAT JSON) DELETE FROM public.orders WHERE id = 1",
+      "expect": "observe"
+    },
+    {
+      "name": "L3_set_session_search_path_err",
+      "_doc": "§8 L-3：任意 SET 形态（改 search_path）无放行分支 → Err(Unclassifiable)，绝不放行",
+      "sql": "SET search_path TO public",
+      "expect": "err_unclassifiable"
+    },
+    {
+      "name": "L3_set_role_err",
+      "_doc": "§8 L-3：任意 SET 形态（SET ROLE 会话语义篡改）→ Err(Unclassifiable)",
+      "sql": "SET ROLE admin",
+      "expect": "err_unclassifiable"
+    },
+    {
+      "name": "L3_set_local_timeout_err",
+      "_doc": "§8 L-3：任意 SET 形态（SET LOCAL 超时类）→ Err(Unclassifiable)（无白名单逃生口，任一 SET 形态皆拒）",
+      "sql": "SET LOCAL statement_timeout = 0",
+      "expect": "err_unclassifiable"
+    },
+    {
+      "name": "L5_multi_statement_err",
+      "_doc": "§8 L-5：多语句（读 + 写）无法按单一动词归档 → Err(MultiStatement)，绝不取首句放行",
+      "sql": "SELECT 1; DROP TABLE public.orders",
+      "expect": "err_multi"
+    },
+    {
+      "name": "L5_parse_failure_err",
+      "_doc": "§8 L-5：语法不可解析 → Err(ParseFailed)（fail-closed，解析不了即不可归类）",
+      "sql": "SELECT FROM WHERE )(",
+      "expect": "err_parse"
+    },
+    {
+      "name": "L5_do_anonymous_block_err",
+      "_doc": "§8 L-5：DO 匿名块 —— 块体不可静态归档 → Err（fail-closed）。dollar-quoted 块体在 PostgreSqlDialect 下解析即失败 → ParseFailed（解析不了等价不可归类）",
+      "sql": "DO $$ BEGIN PERFORM 1; END $$",
+      "expect": "err_parse"
+    },
+    {
+      "name": "L5_copy_unknown_err",
+      "_doc": "§8 L-5：COPY 批量拷贝 —— 白名单外未知形态 → Err(UnknownConstruct)（fail-closed）",
+      "sql": "COPY public.orders TO STDOUT",
+      "expect": "err_unknown"
+    },
+    {
+      "name": "L5_call_procedure_unknown_err",
+      "_doc": "§8 L-5：CALL 过程调用 —— 不透明副作用，白名单外 → Err(UnknownConstruct)",
+      "sql": "CALL do_maintenance()",
+      "expect": "err_unknown"
+    }
+  ]
+}

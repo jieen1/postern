@@ -1,0 +1,140 @@
+{
+  "_note": "postgres Intent 负载序列化往返语料（F-12）。roundtrip 组：每条 case 为一份 postern_query/observe/mutate/destroy 动词工具的 request 负载（PgRequest 形态：{statement, params}），断言 from_payload(serialize(request)) 反序列化后逐字段相等、且再序列化得同一份 JSON。parse_failure 组：每条 case 为一段非法字节，断言 from_payload 恰返回 ClassifyError::ParseFailed。语句原文作数据放此处，对 .rs 扫描器隐形（B 方案）。",
+  "roundtrip": [
+    {
+      "name": "read_only_no_params",
+      "request": {
+        "statement": "SELECT id, status FROM public.orders WHERE status = 'paid'",
+        "params": []
+      }
+    },
+    {
+      "name": "read_only_params_omitted_defaults_empty",
+      "request": {
+        "statement": "SELECT id FROM public.orders WHERE id = $1"
+      },
+      "expect_serialized": {
+        "statement": "SELECT id FROM public.orders WHERE id = $1",
+        "params": []
+      }
+    },
+    {
+      "name": "read_only_positional_params_mixed_scalars",
+      "request": {
+        "statement": "SELECT * FROM public.orders WHERE status = $1 AND total > $2 AND active = $3 AND note = $4",
+        "params": ["paid", 1000, true, null]
+      }
+    },
+    {
+      "name": "observe_show",
+      "request": {
+        "statement": "SHOW server_version",
+        "params": []
+      }
+    },
+    {
+      "name": "observe_explain_plain",
+      "request": {
+        "statement": "EXPLAIN SELECT id FROM public.orders",
+        "params": []
+      }
+    },
+    {
+      "name": "mutate_insert_with_params",
+      "request": {
+        "statement": "INSERT INTO public.orders (id, status) VALUES ($1, $2)",
+        "params": [42, "paid"]
+      }
+    },
+    {
+      "name": "mutate_update_with_params",
+      "request": {
+        "statement": "UPDATE public.orders SET status = $1 WHERE id = $2",
+        "params": ["shipped", 7]
+      }
+    },
+    {
+      "name": "destroy_delete",
+      "request": {
+        "statement": "DELETE FROM public.orders WHERE id = $1",
+        "params": [9]
+      }
+    },
+    {
+      "name": "destroy_drop_table",
+      "request": {
+        "statement": "DROP TABLE public.orders",
+        "params": []
+      }
+    },
+    {
+      "name": "disguise_cte_delete_preserved_verbatim",
+      "request": {
+        "statement": "WITH gone AS (DELETE FROM public.orders WHERE id = $1 RETURNING *) SELECT count(*) FROM gone",
+        "params": [3]
+      }
+    },
+    {
+      "name": "disguise_subquery_insert_preserved_verbatim",
+      "request": {
+        "statement": "SELECT * FROM (INSERT INTO public.orders (id) VALUES ($1) RETURNING id) t",
+        "params": [11]
+      }
+    },
+    {
+      "name": "unicode_and_quotes_preserved",
+      "request": {
+        "statement": "SELECT '订单 \"已付款\"' AS label, e'line1\\nline2' AS body",
+        "params": ["名字", "값"]
+      }
+    },
+    {
+      "name": "params_float_and_negative_preserved",
+      "request": {
+        "statement": "SELECT * FROM public.metrics WHERE ratio = $1 AND delta = $2",
+        "params": [0.125, -7]
+      }
+    },
+    {
+      "name": "empty_statement_still_roundtrips",
+      "request": {
+        "statement": "",
+        "params": []
+      }
+    }
+  ],
+  "parse_failure": [
+    {
+      "name": "not_json_at_all",
+      "bytes": "this is not json"
+    },
+    {
+      "name": "empty_bytes",
+      "bytes": ""
+    },
+    {
+      "name": "json_array_not_object",
+      "bytes": "[\"SELECT 1\"]"
+    },
+    {
+      "name": "json_object_missing_statement_field",
+      "bytes": "{\"params\": []}"
+    },
+    {
+      "name": "statement_wrong_type_number",
+      "bytes": "{\"statement\": 123}"
+    },
+    {
+      "name": "params_wrong_type_object",
+      "bytes": "{\"statement\": \"SELECT 1\", \"params\": {}}"
+    },
+    {
+      "name": "truncated_json",
+      "bytes": "{\"statement\": \"SELECT 1\""
+    },
+    {
+      "name": "trailing_garbage_after_object",
+      "bytes": "{\"statement\": \"SELECT 1\", \"params\": []} extra"
+    }
+  ]
+}

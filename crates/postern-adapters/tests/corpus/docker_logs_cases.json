@@ -1,0 +1,113 @@
+{
+  "_note": "docker_logs 单元语料（F-6 / F-8 container_prefix / L-7 / L-9）。两组用例：classify_cases —— 由 request(action/container/since/tail/follow) 物化 Intent，断言恒 Observe + objects=[container:<名>]；constraint_cases —— 由 ci(container) + spec(container_prefix kind+prefix) 断言 ok_true(命中前缀)/ok_false(不命中)/err(缺信息/未知 kind/非法 spec)。docker_logs 无 SQL，语料天然零 SQL 标记，放数据文件与 postgres B 方案一致。",
+  "classify_cases": [
+    {
+      "name": "trace3_app_order_tail",
+      "_doc": "场景 04 §4.1 Trace ③：postern_observe(request={action:logs, container:app-order, tail:200}) → Observe, objects=[container:app-order]",
+      "request": { "action": "logs", "container": "app-order", "tail": 200 },
+      "expect_capability": "observe",
+      "expect_objects": ["container:app-order"]
+    },
+    {
+      "name": "since_only",
+      "_doc": "只带 since 的取数请求仍恒 Observe",
+      "request": { "action": "logs", "container": "app-order", "since": "1h" },
+      "expect_capability": "observe",
+      "expect_objects": ["container:app-order"]
+    },
+    {
+      "name": "follow_stream",
+      "_doc": "follow=true 流式取数仍恒 Observe（流式性不改变只读归类）",
+      "request": { "action": "logs", "container": "app-cart", "follow": true },
+      "expect_capability": "observe",
+      "expect_objects": ["container:app-cart"]
+    },
+    {
+      "name": "bare_container",
+      "_doc": "无任何取数范围参数（最小负载）仍恒 Observe",
+      "request": { "action": "logs", "container": "sys-metrics" },
+      "expect_capability": "observe",
+      "expect_objects": ["container:sys-metrics"]
+    }
+  ],
+  "constraint_cases": [
+    {
+      "name": "prefix_hit",
+      "_doc": "F-8 / 场景 04 §4.1 Trace ③[4]：container_prefix=app- 命中 app-order → Ok(true)",
+      "container": "app-order",
+      "spec_kind": "container_prefix",
+      "spec": { "prefix": "app-" },
+      "expect": "ok_true"
+    },
+    {
+      "name": "prefix_miss",
+      "_doc": "F-8：非 app- 前缀容器（系统容器）→ Ok(false)，不放行（全称量化，越界即 false）",
+      "container": "sys-metrics",
+      "spec_kind": "container_prefix",
+      "spec": { "prefix": "app-" },
+      "expect": "ok_false"
+    },
+    {
+      "name": "prefix_miss_partial",
+      "_doc": "F-8：前缀须从头匹配——容器名含 app- 但不以其开头 → Ok(false)（非子串匹配）",
+      "container": "legacy-app-order",
+      "spec_kind": "container_prefix",
+      "spec": { "prefix": "app-" },
+      "expect": "ok_false"
+    },
+    {
+      "name": "unknown_kind",
+      "_doc": "L-7：非本 adapter 拥有的 kind → Err(UnknownKind)，绝不 Ok(true)",
+      "container": "app-order",
+      "spec_kind": "table_allow",
+      "spec": { "tables": ["public.orders"] },
+      "expect": "err_unknown_kind"
+    },
+    {
+      "name": "invalid_spec",
+      "_doc": "L-7：container_prefix 的 spec 非法（缺 prefix 字段）→ Err(InvalidSpec)，绝不 Ok(true)",
+      "container": "app-order",
+      "spec_kind": "container_prefix",
+      "spec": { "wrong_field": "app-" },
+      "expect": "err_invalid_spec"
+    }
+  ],
+  "missing_objects_case": {
+    "_doc": "L-7：ci.objects 中无 container:<名> 维度（判定所需信息缺失）→ Err(MissingObjects)，绝不 Ok(true)。无法由 request 物化（schema 必带 container），故单列：直接构造空 objects 的 ci。",
+    "spec_kind": "container_prefix",
+    "spec": { "prefix": "app-" },
+    "expect": "err_missing_objects"
+  },
+  "parse_fail_cases": [
+    {
+      "name": "not_json",
+      "_doc": "L-5 / §3.1 fail-closed：负载根本不是 JSON（任意伪装/异常字节）→ decode 失败 → Err(ParseFailed)，绝不降级放行为 Observe。raw_payload 为原始负载字节（UTF-8 字符串）。",
+      "raw_payload": "not a docker_logs payload at all",
+      "expect": "err_parse"
+    },
+    {
+      "name": "empty_payload",
+      "_doc": "L-5：空负载 → decode 失败 → Err(ParseFailed)。",
+      "raw_payload": "",
+      "expect": "err_parse"
+    },
+    {
+      "name": "missing_action_tag",
+      "_doc": "L-5：合法 JSON 但缺判别标签 action → 无法解为封闭枚举任一变体 → Err(ParseFailed)，绝不当作 logs 放行。",
+      "raw_payload": "{\"container\":\"app-order\"}",
+      "expect": "err_parse"
+    },
+    {
+      "name": "unknown_action_disguise",
+      "_doc": "L-5 / 核心缺口：action 取封闭枚举无法表达的写/控制动词（伪装的 exec）→ 无此变体 → Err(ParseFailed)，绝不被静默降级为 Observe 放行。这正是 fail-closed 审计要堵的「伪装输入被降级放行」缺口。",
+      "raw_payload": "{\"action\":\"runcommand\",\"container\":\"app-order\",\"cmd\":\"rm -rf /\"}",
+      "expect": "err_parse"
+    },
+    {
+      "name": "logs_missing_container",
+      "_doc": "L-5：action=logs 但缺 schema 必带的 container 字段 → decode 失败 → Err(ParseFailed)，绝不放行无对象维度的归类。",
+      "raw_payload": "{\"action\":\"logs\"}",
+      "expect": "err_parse"
+    }
+  ]
+}

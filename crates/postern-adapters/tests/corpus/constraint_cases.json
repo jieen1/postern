@@ -1,0 +1,149 @@
+{
+  "_note": "postgres check_constraint 细则语料（F-8, L-7/L-8；设计 05 §3.2）。check_constraint 是纯函数：check(spec, ci) -> Result<bool, ConstraintError>，只读 spec 与已物化的 ci.objects，不发 IO。本语料直接给 ci（capability + objects 字符串），不经 classify——把单元收敛到「细则判定」一处，且对象用 ObjectRef 字符串（schema.table / col:schema.table.column）承载，零 SQL 文本。每条 case: { name, kind, spec_json, ci:{capability,objects}, expect:{ok:bool}|{err:variant} }。属主两 kind：table_allow（集合包含类·全称量化：ci 表集每个都须在 spec.tables 白名单内，任一越界 ok=false）、column_mask（触达禁止类：ci 列集与 spec.columns 禁止集交集须为空，非空 ok=false）。三类期望：白名单内 ok=true / 白名单外 ok=false / 缺信息 err。err variant ∈ unknown_kind|invalid_spec|missing_objects（恰映射 core::ConstraintError，绝不 Ok(true)）。ObjectRef 约定：表维度裸 schema.table；列维度 col: 前缀（col:public.customers.email），使 check 能在 ci.objects 内区分两维度。",
+  "cases": [
+    {
+      "name": "F8_table_allow_inside_single",
+      "_doc": "F-8 / Trace①[4]：唯一触达表在白名单内 → Ok(true)（白名单内表放行）",
+      "kind": "table_allow",
+      "spec_json": "{\"tables\":[\"public.orders\",\"public.customers\"]}",
+      "ci": { "capability": "query", "objects": ["public.orders"] },
+      "expect": { "ok": true }
+    },
+    {
+      "name": "F8_table_allow_inside_all_of_many",
+      "_doc": "L-8 全称量化（正向）：触达多表，每一张都在白名单内 → Ok(true)。全称满足才放行",
+      "kind": "table_allow",
+      "spec_json": "{\"tables\":[\"public.orders\",\"public.customers\"]}",
+      "ci": { "capability": "query", "objects": ["public.customers", "public.orders"] },
+      "expect": { "ok": true }
+    },
+    {
+      "name": "F8_table_allow_outside_single",
+      "_doc": "F-8 / Trace①[4]：唯一触达表落在白名单外 → Ok(false)（白名单外表 deny，非 Err）",
+      "kind": "table_allow",
+      "spec_json": "{\"tables\":[\"public.orders\",\"public.customers\"]}",
+      "ci": { "capability": "query", "objects": ["public.payments"] },
+      "expect": { "ok": false }
+    },
+    {
+      "name": "L8_table_allow_one_of_many_outside_fail_closed",
+      "_doc": "L-8 核心 fail-closed：触达 N 表，N-1 在白名单内、仅 1 张越界 → 整体 Ok(false)。绝非存在量化（有一个命中即放行）的 fail-open——任一越界即不通过",
+      "kind": "table_allow",
+      "spec_json": "{\"tables\":[\"public.orders\",\"public.customers\"]}",
+      "ci": { "capability": "query", "objects": ["public.orders", "public.payments"] },
+      "expect": { "ok": false }
+    },
+    {
+      "name": "L8_table_allow_all_outside",
+      "_doc": "L-8：触达多表全部越界 → Ok(false)",
+      "kind": "table_allow",
+      "spec_json": "{\"tables\":[\"public.orders\"]}",
+      "ci": { "capability": "query", "objects": ["public.payments", "public.audit_log"] },
+      "expect": { "ok": false }
+    },
+    {
+      "name": "L8_table_allow_empty_whitelist_any_object_fail",
+      "_doc": "L-8：白名单为空集 → 任何触达对象皆越界 → Ok(false)（空白名单即一律不通过，不放行）",
+      "kind": "table_allow",
+      "spec_json": "{\"tables\":[]}",
+      "ci": { "capability": "query", "objects": ["public.orders"] },
+      "expect": { "ok": false }
+    },
+    {
+      "name": "L7_table_allow_no_objects_missing",
+      "_doc": "L-7：table_allow 需要表维度，但 ci.objects 无任何表对象（classify 未能可靠提取）→ Err(MissingObjects)，绝不 Ok(true)。判不了等价不通过",
+      "kind": "table_allow",
+      "spec_json": "{\"tables\":[\"public.orders\"]}",
+      "ci": { "capability": "query", "objects": [] },
+      "expect": { "err": "missing_objects" }
+    },
+    {
+      "name": "L7_table_allow_only_column_objects_missing_table_dim",
+      "_doc": "L-7：ci.objects 仅含列维度对象（col:...），缺表维度 → table_allow 判不了 → Err(MissingObjects)，不得退化为 Ok(true)",
+      "kind": "table_allow",
+      "spec_json": "{\"tables\":[\"public.orders\"]}",
+      "ci": { "capability": "query", "objects": ["col:public.orders.total"] },
+      "expect": { "err": "missing_objects" }
+    },
+    {
+      "name": "InvalidSpec_table_allow_bad_json",
+      "_doc": "§3.2：spec 负载非法 JSON → Err(InvalidSpec)（解析失败不吞错放行，绝不 Ok(true)）",
+      "kind": "table_allow",
+      "spec_json": "{not valid json",
+      "ci": { "capability": "query", "objects": ["public.orders"] },
+      "expect": { "err": "invalid_spec" }
+    },
+    {
+      "name": "InvalidSpec_table_allow_wrong_shape",
+      "_doc": "§3.2：spec 是合法 JSON 但缺 tables 键（schema 不符）→ Err(InvalidSpec），不得当空白名单或放行",
+      "kind": "table_allow",
+      "spec_json": "{\"allow\":[\"public.orders\"]}",
+      "ci": { "capability": "query", "objects": ["public.orders"] },
+      "expect": { "err": "invalid_spec" }
+    },
+    {
+      "name": "F8_column_mask_not_touched_ok",
+      "_doc": "F-8 / Trace①[9]反向（求值期）：column_mask 禁止集为 PII 列，请求未触达任何禁止列 → 交集空 → Ok(true)（不触达放行）",
+      "kind": "column_mask",
+      "spec_json": "{\"columns\":[\"public.customers.email\",\"public.customers.phone\"]}",
+      "ci": { "capability": "query", "objects": ["public.orders", "col:public.orders.id", "col:public.orders.total"] },
+      "expect": { "ok": true }
+    },
+    {
+      "name": "F8_column_mask_touched_forbidden_false",
+      "_doc": "F-8：请求触达禁止列（public.customers.email）→ 交集非空 → Ok(false)（求值期拒绝触达，区别于出口 mask_fields 擦响应——本 kind 不放行）",
+      "kind": "column_mask",
+      "spec_json": "{\"columns\":[\"public.customers.email\",\"public.customers.phone\"]}",
+      "ci": { "capability": "query", "objects": ["public.customers", "col:public.customers.id", "col:public.customers.email"] },
+      "expect": { "ok": false }
+    },
+    {
+      "name": "L8_column_mask_one_of_many_forbidden_false",
+      "_doc": "触达禁止类 fail-closed：触达多列，仅 1 列落禁止集 → 交集非空 → Ok(false)（任一禁止列被触达即不通过）",
+      "kind": "column_mask",
+      "spec_json": "{\"columns\":[\"public.customers.phone\"]}",
+      "ci": { "capability": "query", "objects": ["col:public.customers.id", "col:public.customers.name", "col:public.customers.phone"] },
+      "expect": { "ok": false }
+    },
+    {
+      "name": "column_mask_empty_forbidden_set_ok",
+      "_doc": "§3.2：禁止集为空 → 交集恒空 → Ok(true)（无禁列时一切触达放行；与 table_allow 空白名单语义相反，二者非对偶）",
+      "kind": "column_mask",
+      "spec_json": "{\"columns\":[]}",
+      "ci": { "capability": "query", "objects": ["col:public.customers.email"] },
+      "expect": { "ok": true }
+    },
+    {
+      "name": "L7_column_mask_no_column_objects_missing",
+      "_doc": "L-7：column_mask 需要列维度，但 ci.objects 无任何列对象（classify 未提取列）→ 无法确认未触达 → Err(MissingObjects)，绝不 Ok(true)（判不了=不通过）",
+      "kind": "column_mask",
+      "spec_json": "{\"columns\":[\"public.customers.email\"]}",
+      "ci": { "capability": "query", "objects": ["public.customers"] },
+      "expect": { "err": "missing_objects" }
+    },
+    {
+      "name": "InvalidSpec_column_mask_bad_json",
+      "_doc": "§3.2：column_mask spec 非法 JSON → Err(InvalidSpec)（不吞错放行）",
+      "kind": "column_mask",
+      "spec_json": "]]not json[[",
+      "ci": { "capability": "query", "objects": ["col:public.customers.email"] },
+      "expect": { "err": "invalid_spec" }
+    },
+    {
+      "name": "UnknownKind_unsupported",
+      "_doc": "§3.2：kind 非本适配器属主（http_route 属 http、key_prefix 属 redis）→ Err(UnknownKind)，绝不 Ok(true)",
+      "kind": "http_route",
+      "spec_json": "{\"routes\":[\"GET /api/orders\"]}",
+      "ci": { "capability": "query", "objects": ["public.orders"] },
+      "expect": { "err": "unknown_kind" }
+    },
+    {
+      "name": "UnknownKind_mask_fields_not_eval_time",
+      "_doc": "§3.2 / L 双防线：mask_fields 是出口期擦响应（由内核 Sanitizer 执行），不在求值期参与 check_constraint → 对本函数是未知 kind → Err(UnknownKind)。绝不在此把 mask_fields 当 column_mask 求值（两道防线不可混）",
+      "kind": "mask_fields",
+      "spec_json": "{\"fields\":[\"customers.email\"]}",
+      "ci": { "capability": "query", "objects": ["col:public.customers.email"] },
+      "expect": { "err": "unknown_kind" }
+    }
+  ]
+}

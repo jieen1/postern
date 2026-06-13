@@ -1,0 +1,155 @@
+{
+  "_note": "伪装攻击语料全集（L-1/L-2/L-6, §7/§8 二组）。覆盖:写 CTE 包裹 / 子查询藏写 / 多语句 / 注释混淆 / 匿名块 DO / 会话语义篡改 SET / EXPLAIN ANALYZE 写。每条 case: { name, sql, expect, min_tier } —— 两层断言:(1) expect 钉死归其真实最高危档(destroy/mutate)或具体 err；(2) min_tier 是该伪装写的真实危险下界——断言结果绝不低于此(只读档 query/observe 即判为危险降级放行 → 测试红)。核心:无一条伪装写被降级为低危档放行。SQL 文本作数据放此处(扫描器只扫 .rs/.sql，数据文件隐形，B 方案)。",
+  "cases": [
+    {
+      "name": "disguise_cte_delete_wrapped",
+      "_doc": "L-6 / L-1：写 CTE 包裹 —— WITH x AS (DELETE ... RETURNING *) SELECT，顶层只读 Query 外壳藏 DELETE。真实最高危档 destroy，绝不因外壳降为 query",
+      "sql": "WITH gone AS (DELETE FROM public.orders WHERE id = 1 RETURNING id) SELECT id FROM gone",
+      "expect": "destroy",
+      "min_tier": "mutate"
+    },
+    {
+      "name": "disguise_cte_insert_wrapped",
+      "_doc": "L-6 / L-2：子查询藏写 —— WITH x AS (INSERT ... RETURNING *) SELECT。真实档 mutate，绝不降为 query",
+      "sql": "WITH ins AS (INSERT INTO public.orders (id, total) VALUES (1, 9) RETURNING id) SELECT id FROM ins",
+      "expect": "mutate",
+      "min_tier": "mutate"
+    },
+    {
+      "name": "disguise_cte_update_wrapped",
+      "_doc": "L-6：写 CTE 包裹 UPDATE，顶层只读 SELECT 外壳。真实档 mutate，绝不降为 query",
+      "sql": "WITH upd AS (UPDATE public.orders SET total = 0 WHERE id = 1 RETURNING id) SELECT id FROM upd",
+      "expect": "mutate",
+      "min_tier": "mutate"
+    },
+    {
+      "name": "disguise_nested_cte_delete_deep",
+      "_doc": "L-6：多层 CTE 嵌套藏 DELETE（更深外壳）—— 穿透提升仍 destroy，层数不改变判据",
+      "sql": "WITH a AS (SELECT 1 AS x), b AS (DELETE FROM public.orders WHERE id = 1 RETURNING id) SELECT x FROM a",
+      "expect": "destroy",
+      "min_tier": "mutate"
+    },
+    {
+      "name": "disguise_comment_obfuscated_delete",
+      "_doc": "L-6：注释混淆 —— DELETE 夹行内 / 块注释。AST 解析剥注释，仍归 Statement::Delete → destroy，注释不能掩盖写",
+      "sql": "DELETE /* keep me */ FROM public.orders -- trailing\nWHERE id = 1",
+      "expect": "destroy",
+      "min_tier": "mutate"
+    },
+    {
+      "name": "disguise_comment_leading_block_drop",
+      "_doc": "L-6：前导块注释伪装 —— 注释在语句前，AST 仍解析为 DROP → destroy",
+      "sql": "/* harmless select */ DROP TABLE public.orders",
+      "expect": "destroy",
+      "min_tier": "mutate"
+    },
+    {
+      "name": "disguise_multi_statement_read_then_write",
+      "_doc": "L-6：多语句藏写 —— 读 + 写并列，企图以首句只读蒙混。无法按单一动词归档 → Err(MultiStatement)，绝不取首句 query 放行",
+      "sql": "SELECT 1; DELETE FROM public.orders WHERE id = 1",
+      "expect": "err_multi",
+      "min_tier": "mutate"
+    },
+    {
+      "name": "disguise_multi_statement_write_then_read",
+      "_doc": "L-6：多语句（写在前）—— 同样 Err(MultiStatement)，绝不放行任一句",
+      "sql": "DROP TABLE public.orders; SELECT 1",
+      "expect": "err_multi",
+      "min_tier": "mutate"
+    },
+    {
+      "name": "disguise_do_anonymous_block",
+      "_doc": "L-6：匿名块 DO —— 块体内可含任意写副作用，静态不可归档。dollar-quoted 块体解析失败 → Err(ParseFailed)，绝不放行",
+      "sql": "DO $$ BEGIN DELETE FROM public.orders; END $$",
+      "expect": "err_parse",
+      "min_tier": "mutate"
+    },
+    {
+      "name": "disguise_set_search_path_tamper",
+      "_doc": "L-6 / L-3：会话语义篡改 —— SET search_path 改后续语句解析语境，无归属动词。Err(Unclassifiable)，绝不放行",
+      "sql": "SET search_path TO evil",
+      "expect": "err_unclassifiable",
+      "min_tier": "mutate"
+    },
+    {
+      "name": "disguise_set_role_tamper",
+      "_doc": "L-6 / L-3：会话语义篡改 —— SET ROLE 提权后续语句。Err(Unclassifiable)，绝不放行",
+      "sql": "SET ROLE postgres",
+      "expect": "err_unclassifiable",
+      "min_tier": "mutate"
+    },
+    {
+      "name": "disguise_explain_analyze_delete",
+      "_doc": "L-6 / L-4：EXPLAIN ANALYZE 写 —— ANALYZE 真实执行被解释语句，企图以 EXPLAIN 外壳伪装只读。按内部最高危写定档 destroy，绝不降为 observe",
+      "sql": "EXPLAIN ANALYZE DELETE FROM public.orders WHERE id = 1",
+      "expect": "destroy",
+      "min_tier": "mutate"
+    },
+    {
+      "name": "disguise_explain_analyze_update",
+      "_doc": "L-6 / L-4：EXPLAIN ANALYZE UPDATE 真实执行 → 按内部写定档 mutate，绝不降为 observe",
+      "sql": "EXPLAIN ANALYZE UPDATE public.orders SET total = 0 WHERE id = 1",
+      "expect": "mutate",
+      "min_tier": "mutate"
+    },
+    {
+      "name": "disguise_derived_subquery_delete",
+      "_doc": "L-6 / L-2：子查询藏写（派生表 FROM 子句）—— 顶层只读 SELECT，写藏在 FROM (DELETE ... RETURNING) AS d 派生表子查询里。穿透 TableFactor::Derived 子树命中 Statement::Delete → destroy，绝不因只读外壳降为 query",
+      "sql": "SELECT * FROM (DELETE FROM public.orders WHERE id = 1 RETURNING id) AS d",
+      "expect": "destroy",
+      "min_tier": "mutate"
+    },
+    {
+      "name": "disguise_insert_select_source",
+      "_doc": "L-6：INSERT 源为子查询（写外壳 + 内嵌只读 SELECT 源）—— 顶层写 mutate，子树 SELECT 源不下调档。绝不被内嵌只读源迷惑降为 query",
+      "sql": "INSERT INTO public.audit (id) SELECT id FROM public.orders",
+      "expect": "mutate",
+      "min_tier": "mutate"
+    },
+    {
+      "name": "disguise_truncate_plain",
+      "_doc": "L-6：清表 TRUNCATE —— 顶层即最高危不可逆写。Statement::Truncate → destroy",
+      "sql": "TRUNCATE public.orders",
+      "expect": "destroy",
+      "min_tier": "mutate"
+    },
+    {
+      "name": "disguise_copy_bulk_load",
+      "_doc": "L-6 / L-5：批量拷贝 COPY —— 白名单外语句形态，可携写副作用且静态不可靠归档。Err(UnknownConstruct)，绝不放行（§3.1 显式枚举 COPY 落 Err）",
+      "sql": "COPY public.orders FROM '/tmp/x.csv'",
+      "expect": "err_unknown",
+      "min_tier": "mutate"
+    },
+    {
+      "name": "disguise_call_procedure",
+      "_doc": "L-6 / L-5：过程调用 CALL —— 过程体可含任意写副作用，静态不可归档。白名单外 → Err(UnknownConstruct)，绝不放行（§3.1 显式枚举 CALL 落 Err）",
+      "sql": "CALL do_something()",
+      "expect": "err_unknown",
+      "min_tier": "mutate"
+    },
+    {
+      "name": "disguise_select_into_materialize",
+      "_doc": "L-6 / §3.1 第44/47/56 行 + F-2 第325 行：SELECT ... INTO 物化建表 —— 顶层是只读 Query 外壳，INTO 目标却物化建一张新表（写副作用）。穿透 INTO 目标按写定档（绝不归纯只读 Query 档），并采集写目标对象。real 探针曾 Ok(Query)+只收来源表，是把写伪装成读降级放行的真实 fail-open 向量",
+      "sql": "SELECT id INTO public.copy FROM public.orders",
+      "expect": "mutate",
+      "min_tier": "mutate",
+      "objects": ["public.copy", "public.orders"]
+    },
+    {
+      "name": "disguise_select_into_table_materialize",
+      "_doc": "L-6 / §3.1：SELECT ... INTO TABLE 物化建表（显式 TABLE 形态）—— 同样穿透 INTO 目标按写定档，绝不降为只读 Query 档",
+      "sql": "SELECT id INTO TABLE public.copy FROM public.orders",
+      "expect": "mutate",
+      "min_tier": "mutate",
+      "objects": ["public.copy", "public.orders"]
+    },
+    {
+      "name": "disguise_cte_select_into_wrapped",
+      "_doc": "L-6 / §3.1：CTE 外壳 + SELECT ... INTO 物化 —— INTO 藏在更深外壳里仍按写定档，层数不改变判据。穿透 CTE 与 INTO 双外壳",
+      "sql": "WITH src AS (SELECT id FROM public.orders) SELECT id INTO public.copy FROM src",
+      "expect": "mutate",
+      "min_tier": "mutate",
+      "objects": ["public.copy", "public.orders", "src"]
+    }
+  ]
+}

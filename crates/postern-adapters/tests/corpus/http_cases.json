@@ -1,0 +1,93 @@
+{
+  "_note": "http classify / check_constraint 行为语料（F-7/F-8/L-5/L-7）。http 协议输入是 method×path（不含任何 SQL），全程零 SQL 标记。本文件对扫描器隐形（.json）。测试 load -> for case -> classify/check -> 断言恰为 expect。",
+  "_declared_routes_note": "一份典型 HTTP 资源的声明动词工具映射（场景 04 §3.3 b3-1 风格）：读写分路、各动词各自声明形态——classify 据此白名单反查，绝不启发式推断。GET /api/orders 显式声明为 query（不靠『GET 即只读』推断）。",
+  "declared_routes": [
+    { "method": "POST",   "path": "/api/orders", "capability": "mutate" },
+    { "method": "GET",    "path": "/api/orders", "capability": "query" },
+    { "method": "GET",    "path": "/healthz",    "capability": "observe" },
+    { "method": "POST",   "path": "/api/deploy", "capability": "manage" },
+    { "method": "DELETE", "path": "/api/orders", "capability": "destroy" }
+  ],
+
+  "classify_cases": [
+    {
+      "_why": "F-7 核心（场景 04 §4.1 Trace ②[2]）：POST /api/orders 命中声明的 mutate 形态。",
+      "method": "POST", "path": "/api/orders",
+      "expect_capability": "mutate",
+      "expect_objects": ["route:/api/orders"]
+    },
+    {
+      "_why": "F-7 禁启发式：同路径 GET 命中声明的 query（不靠 GET 即只读推断）。",
+      "method": "GET", "path": "/api/orders",
+      "expect_capability": "query",
+      "expect_objects": ["route:/api/orders"]
+    },
+    {
+      "_why": "F-7：声明为 observe 的形态恰归 observe，不串档。",
+      "method": "GET", "path": "/healthz",
+      "expect_capability": "observe",
+      "expect_objects": ["route:/healthz"]
+    },
+    {
+      "_why": "F-7：声明为 manage 的形态恰归 manage。",
+      "method": "POST", "path": "/api/deploy",
+      "expect_capability": "manage",
+      "expect_objects": ["route:/api/deploy"]
+    },
+    {
+      "_why": "F-7：高危 destroy 同样完全由声明决定，未被任何降级。",
+      "method": "DELETE", "path": "/api/orders",
+      "expect_capability": "destroy",
+      "expect_objects": ["route:/api/orders"]
+    },
+    {
+      "_why": "L-5 核心 fail-closed：未声明 (method,path) 未落任何声明形态 → Err（白名单，未声明即不可归类）。",
+      "method": "POST", "path": "/api/admin/wipe",
+      "expect": "err"
+    },
+    {
+      "_why": "L-5/F-7 最关键的 fail-open 杀手：未声明路径的 GET 不得被假设只读放行——必须 Err（禁『GET 即只读』）。",
+      "method": "GET", "path": "/internal/dump",
+      "expect": "err"
+    },
+    {
+      "_why": "L-5：路径已声明但方法未声明（PUT /api/orders，白名单仅 GET/POST/DELETE）须 Err——(method,path) 须整体命中。",
+      "method": "PUT", "path": "/api/orders",
+      "expect": "err"
+    }
+  ],
+
+  "_constraint_note": "http_route 白名单按动词键入（classify 已把 method 映射为 ci.capability，故白名单判定按 (capability, path) 全称量化）。白名单同时声明读 query+写 mutate 的 /api/orders，证明读写分路真区分。",
+  "constraint_whitelist": [
+    { "capability": "mutate", "path": "/api/orders" },
+    { "capability": "query",  "path": "/api/orders" }
+  ],
+
+  "constraint_cases": [
+    {
+      "_why": "F-8 核心（场景 04 §4.1 Trace ②[4]）：命中白名单 (mutate,/api/orders) → Ok(true)。",
+      "capability": "mutate", "path": "/api/orders",
+      "expect": "ok_true"
+    },
+    {
+      "_why": "F-8：读形态 (query,/api/orders) 在白名单内 → Ok(true)（读写分路，读形态命中）。",
+      "capability": "query", "path": "/api/orders",
+      "expect": "ok_true"
+    },
+    {
+      "_why": "F-8/L-7 核心 fail-closed：白名单外路径 (mutate,/api/admin/reset) → Ok(false)，绝不 Ok(true)。",
+      "capability": "mutate", "path": "/api/admin/reset",
+      "expect": "ok_false"
+    },
+    {
+      "_why": "F-8/L-7 动词维度 fail-closed（核心红线）：路径在白名单内但动词越界——(destroy,/api/orders)，白名单仅声明 query/mutate（无 destroy）。须 Ok(false)，绝不 Ok(true)。只比 path 忽略动词是 fail-open（越权写穿过读/写子集白名单）。",
+      "capability": "destroy", "path": "/api/orders",
+      "expect": "ok_false"
+    },
+    {
+      "_why": "F-8/L-7 动词维度对称补强：(observe,/api/orders) 越界（白名单仅 query/mutate），须 Ok(false)。与上例共同钉死：路径命中但任一未声明动词都不放行——绝非只看 path。",
+      "capability": "observe", "path": "/api/orders",
+      "expect": "ok_false"
+    }
+  ]
+}

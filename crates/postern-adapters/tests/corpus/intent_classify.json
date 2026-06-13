@@ -1,0 +1,152 @@
+{
+  "_note": "postgres classify 归类语料（语法树归类阶段，区别于 from_payload 负载反序列化阶段）。每条 case: { name, statement, expect } —— expect 为期望档名(query/observe/mutate/destroy) 或期望归类错误(parse_failed/multi_statement/unclassifiable/unknown_construct)。测试 load -> for case -> 以 statement 构造 postgres Intent -> PostgresAdapter::classify(intent) -> 断言 capability 恰为 expect 档 或 ClassifyError 恰为 expect 变体。语句原文(含 SET / EXPLAIN ANALYZE 写 / 多语句 / DO/COPY/CALL / CTE 藏写)作数据放此处，对 .rs 扫描器隐形（B 方案）。覆盖 F-2~F-5 / L-1~L-5。",
+  "classify_ok": [
+    {
+      "name": "f2_pure_read_select_to_query",
+      "statement": "SELECT id, status FROM public.orders WHERE status = 'paid'",
+      "expect": "query"
+    },
+    {
+      "name": "f2_read_join_two_tables_to_query",
+      "statement": "SELECT o.id FROM public.orders o JOIN public.customers c ON c.id = o.customer_id",
+      "expect": "query"
+    },
+    {
+      "name": "f3_insert_to_mutate",
+      "statement": "INSERT INTO public.orders (id, status) VALUES (1, 'paid')",
+      "expect": "mutate"
+    },
+    {
+      "name": "f3_update_to_mutate",
+      "statement": "UPDATE public.orders SET status = 'shipped' WHERE id = 7",
+      "expect": "mutate"
+    },
+    {
+      "name": "f3_merge_to_mutate",
+      "statement": "MERGE INTO public.orders t USING public.staging s ON t.id = s.id WHEN MATCHED THEN UPDATE SET status = s.status",
+      "expect": "mutate"
+    },
+    {
+      "name": "f4_delete_top_level_to_destroy",
+      "statement": "DELETE FROM public.orders WHERE id = 1",
+      "expect": "destroy"
+    },
+    {
+      "name": "f4_drop_table_to_destroy",
+      "statement": "DROP TABLE public.orders",
+      "expect": "destroy"
+    },
+    {
+      "name": "f4_truncate_to_destroy",
+      "statement": "TRUNCATE TABLE public.orders",
+      "expect": "destroy"
+    },
+    {
+      "name": "f5_explain_plain_select_to_observe",
+      "statement": "EXPLAIN SELECT * FROM public.orders",
+      "expect": "observe"
+    },
+    {
+      "name": "f5_show_search_path_to_observe",
+      "statement": "SHOW search_path",
+      "expect": "observe"
+    },
+    {
+      "name": "f5_show_server_version_to_observe",
+      "statement": "SHOW server_version",
+      "expect": "observe"
+    },
+    {
+      "name": "l1_cte_delete_not_downgraded_to_destroy",
+      "statement": "WITH gone AS (DELETE FROM public.orders WHERE id = 1 RETURNING *) SELECT count(*) FROM gone",
+      "expect": "destroy"
+    },
+    {
+      "name": "l1_cte_drop_not_downgraded_to_destroy",
+      "statement": "WITH x AS (SELECT 1) SELECT * FROM x",
+      "expect": "query"
+    },
+    {
+      "name": "l2_subquery_insert_not_downgraded_to_mutate",
+      "statement": "SELECT * FROM (INSERT INTO public.orders (id) VALUES (1) RETURNING id) t",
+      "expect": "mutate"
+    },
+    {
+      "name": "l2_subquery_delete_not_downgraded_to_destroy",
+      "statement": "WITH w AS (UPDATE public.orders SET status = 'x' RETURNING id), z AS (DELETE FROM public.audit WHERE id = 2 RETURNING id) SELECT * FROM w",
+      "expect": "destroy"
+    },
+    {
+      "name": "l4_explain_analyze_delete_to_destroy_not_observe",
+      "statement": "EXPLAIN ANALYZE DELETE FROM public.orders WHERE id = 1",
+      "expect": "destroy"
+    },
+    {
+      "name": "l4_explain_analyze_insert_to_mutate_not_observe",
+      "statement": "EXPLAIN ANALYZE INSERT INTO public.orders (id) VALUES (1)",
+      "expect": "mutate"
+    },
+    {
+      "name": "l4_explain_analyze_select_stays_query",
+      "statement": "EXPLAIN ANALYZE SELECT * FROM public.orders",
+      "expect": "query"
+    }
+  ],
+  "classify_err": [
+    {
+      "name": "l3_set_search_path_rejected",
+      "statement": "SET search_path = public, audit",
+      "expect": "unclassifiable"
+    },
+    {
+      "name": "l3_set_role_rejected",
+      "statement": "SET ROLE admin",
+      "expect": "unclassifiable"
+    },
+    {
+      "name": "l3_set_session_authorization_rejected",
+      "statement": "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE",
+      "expect": "unclassifiable"
+    },
+    {
+      "name": "l5_multi_statement_rejected",
+      "statement": "SELECT 1; DELETE FROM public.orders WHERE id = 1",
+      "expect": "multi_statement"
+    },
+    {
+      "name": "l5_empty_statement_rejected",
+      "statement": "",
+      "expect": "parse_failed"
+    },
+    {
+      "name": "l5_do_anonymous_block_rejected",
+      "statement": "DO $$ BEGIN PERFORM 1; END $$",
+      "expect": "parse_failed"
+    },
+    {
+      "name": "l5_parse_failure_garbage_rejected",
+      "statement": "this is definitely not valid sql @@@",
+      "expect": "parse_failed"
+    },
+    {
+      "name": "l5_copy_rejected_unknown_construct",
+      "statement": "COPY public.orders TO STDOUT",
+      "expect": "unknown_construct"
+    },
+    {
+      "name": "l5_call_rejected_unknown_construct",
+      "statement": "CALL do_something(1, 2)",
+      "expect": "unknown_construct"
+    },
+    {
+      "name": "l5_create_table_rejected_unknown_construct",
+      "statement": "CREATE TABLE public.t (id int)",
+      "expect": "unknown_construct"
+    },
+    {
+      "name": "l5_prepare_rejected_unknown_construct",
+      "statement": "PREPARE p AS SELECT 1",
+      "expect": "unknown_construct"
+    }
+  ]
+}

@@ -4,4 +4,76 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# 唯一允许的工作区依赖边：adapters → core（消费领域类型与 Adapter trait 定义，§6.4）。
+# 契约 ARCH_FORBIDDEN_EDGES 禁止 adapters → secrets/transports/store。
 postern-core = { path = "../postern-core" }
+# 实现 core 的 #[async_trait] Adapter（execute/discover 为 async，宏脱糖，§5）。
+async-trait = "0.1"
+# postgres 协议级语义归一化的语法树底座（§3.1 D5）。必须 0.57：旧版解析不了
+# WITH x AS (...) 这类伪装写，0.57 可（SetExpr 有 Delete 变体、ObjectNamePart）。
+# visitor feature 启用 Visit derive：一趟自顶向下走查穿透 CTE / 子查询 / INTO 子树，
+# 对每个写语句节点提升最高危档、收集对象（§3.1 单调取最大值，不被只读外壳绕过）。
+sqlparser = { version = "0.57", features = ["visitor"] }
+# 全异步 execute / discover 在 tokio 运行时上执行（§3.4/§3.5/§3.7）。
+tokio = { version = "1", features = ["rt", "io-util", "macros"] }
+# Intent 负载 / MCP 动词工具 request schema 的序列化往返（§3.6 F-12）。
+serde = { version = "1.0", features = ["derive"] }
+# 读 .json 语料 / 解析细则 spec 的 JSON 负载（§3.2 ConstraintSpec.spec）。
+serde_json = "1.0"
+# 本 crate 的 thiserror 错误词汇基底（变体→拒绝阶段映射在 core::error，§5/L-15）。
+thiserror = "2"
+
+[features]
+# 第一刀：postgres（SQL 归类核心，engine_enforced=true）默认开；docker_logs / http
+# （engine_enforced=false）默认开。mysql 留 feature 占位，本波次不实现、不建测试。
+default = ["postgres", "docker_logs", "http"]
+postgres = []
+docker_logs = []
+http = []
+mysql = []
+
+[dev-dependencies]
+# 表驱动语料测试读 .json 用例（load → for case → classify → assert）。
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["rt", "macros"] }
+
+# postgres·Intent 负载往返单元（F-12）。
+[[test]]
+name = "postgres_intent"
+path = "tests/postgres_intent.rs"
+
+# postgres·classify 归类单元（F-2~F-5）。
+[[test]]
+name = "postgres_classify"
+path = "tests/postgres_classify.rs"
+
+# postgres·check_constraint 细则单元（F-8 / L-7 / L-8）。
+[[test]]
+name = "postgres_constraint"
+path = "tests/postgres_constraint.rs"
+
+# 伪装攻击语料全集断言（L-1 / L-2 / L-6）。
+[[test]]
+name = "disguise_corpus"
+path = "tests/disguise_corpus.rs"
+
+# postgres·execute 执行单元（F-9）。
+[[test]]
+name = "postgres_execute"
+path = "tests/postgres_execute.rs"
+
+# docker_logs 单元（F-6 / F-10 / 恒 Observe）。
+[[test]]
+name = "docker_logs"
+path = "tests/docker_logs.rs"
+
+# http 单元（F-7 / F-10）。
+[[test]]
+name = "http"
+path = "tests/http.rs"
+
+# common 单元（对象规范化等共享工具）。
+[[test]]
+name = "common-scaffold"
+path = "tests/common.rs"

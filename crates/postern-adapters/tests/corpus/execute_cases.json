@@ -1,0 +1,55 @@
+{
+  "_note": "postgres execute 执行语料（F-9 / L-10 / L-11；设计 05 §3.4，详设 6.3/6.7 项1）。本 crate 的 execute 在 Channel 上以 pg 线协议回放 Intent 携带的语句原文（绝不重解析/改写），结果未脱敏装入 RawResponse（脱敏归内核出口步骤[9]）。两层验收：functional——放行意图在 Channel 上正确执行回未脱敏字节（内存 Fake 通路即可验功能层，场景 04 Trace①/②/③ 步骤[8]）；engine_fallback——一条被误归 Query 的写若经只读账号执行，被引擎直接拒（印证 engine_enforced=true 兜底真实，需真实 PostgreSQL 容器，挂集成层 #[ignore]/feature=pg-itest）。语句原文（含写/伪装写）全部放此数据文件，测试 .rs 零 SQL 标记（B 方案）。每条 case: { name, statement, params?, expect_classify, expect_raw_contains?, expect_exec_error? }。statement 经 PgRequest{statement,params} 装成 Intent 负载，与 classify/execute 看到的同一份原文。expect_classify 钉死该意图被放行时归的档（execute 前置：已放行）。expect_raw_contains（functional）是 Fake 通路应原样回交的未脱敏字节内容子串（execute 不擦字节）。expect_exec_error（engine_fallback）是只读账号下引擎拒后映射的 ExecError 变体。",
+  "functional": [
+    {
+      "name": "F9_query_select_returns_unsanitized_rows",
+      "_doc": "F-9 / Trace①[8]：纯只读 Query 放行后在 Channel 上执行，回未脱敏结果字节（脱敏在步骤[9]，execute 不擦）。",
+      "statement": "SELECT id, status FROM public.orders WHERE status = 'paid'",
+      "params": [],
+      "expect_classify": "query",
+      "expect_raw_contains": "public.orders"
+    },
+    {
+      "name": "F9_query_with_pii_columns_not_masked_by_execute",
+      "_doc": "F-9 关键不变量：execute 绝不擦字节——即便结果含 PII 列（email/phone），execute 回的是未脱敏原文；掩码是内核出口 column_mask 的事（步骤[9]），不在 execute。",
+      "statement": "SELECT email, phone FROM public.customers WHERE id = 1",
+      "params": [],
+      "expect_classify": "query",
+      "expect_raw_contains": "email"
+    },
+    {
+      "name": "F9_observe_show_returns_unsanitized_meta",
+      "_doc": "F-9：只读元信息观测（Observe）放行后执行，回未脱敏元信息字节。",
+      "statement": "SHOW search_path",
+      "params": [],
+      "expect_classify": "observe",
+      "expect_raw_contains": "search_path"
+    },
+    {
+      "name": "F9_mutate_insert_returns_unsanitized_outcome",
+      "_doc": "F-9 / Trace②[8]：写动作（Mutate）放行后执行，回未脱敏的下单结果字节；已落副作用后即便后续出错也绝不返 deny（L-11，由内核守护，本 crate 经 Err 协同）。",
+      "statement": "INSERT INTO public.orders (sku, qty) VALUES ('A-1', 2) RETURNING id",
+      "params": [],
+      "expect_classify": "mutate",
+      "expect_raw_contains": "id"
+    }
+  ],
+  "engine_fallback": [
+    {
+      "name": "ENG_misclassified_write_rejected_by_readonly_account",
+      "_doc": "F-9 安全层 / 详设 6.3、6.7 项1：一条若被误归 Query 的写，经只读账号在引擎层执行被直接拒（engine_enforced=true 兜底真实）。execute 忠实回放原文、不重写；拒由引擎账号权限模型给出，映射为 ExecError。需真实 PostgreSQL 容器，本波次 #[ignore]/feature=pg-itest。",
+      "statement": "DELETE FROM public.orders WHERE id = 1",
+      "params": [],
+      "expect_classify": "destroy",
+      "expect_exec_error": "execution_failed"
+    },
+    {
+      "name": "ENG_cte_hidden_write_rejected_by_readonly_account",
+      "_doc": "F-9 安全层：伪装写（CTE 藏删）即便万一被误归类，只读账号在引擎层仍拒（双防线：归类提升为 Destroy + 引擎兜底）。需容器，#[ignore]/pg-itest。",
+      "statement": "WITH x AS (DELETE FROM public.orders RETURNING *) SELECT * FROM x",
+      "params": [],
+      "expect_classify": "destroy",
+      "expect_exec_error": "execution_failed"
+    }
+  ]
+}
