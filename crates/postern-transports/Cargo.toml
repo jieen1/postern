@@ -5,3 +5,49 @@ edition = "2021"
 
 [dependencies]
 postern-core = { path = "../postern-core" }
+# Implements core 的 #[async_trait] Transport（方法体多，用宏脱糖；§5.1）。
+async-trait = "0.1"
+# 全异步通路：open / 桥接泵 / 保活 / 关闭均在 tokio 运行时上执行（§3.7、详细设计 7.1）。
+tokio = { version = "1", features = ["rt", "net", "io-util", "time", "sync", "macros"] }
+# 脱敏 TransportError 词汇基底（§5.1，跨边界前已脱敏）。
+thiserror = "2"
+
+[features]
+# 第一刀只放 direct（tokio TcpStream）实现；ssh/ssm 占位 feature，具体通路库
+# （russh/ssh2、aws-sdk-ssm 等）后续在各 feature 内门控引入，默认不编译。
+ssh = []
+ssm = []
+
+[dev-dependencies]
+# 机制层测试用内存管道 / loopback（§9：内存 Fake/loopback 为主，注入时钟驱动状态机）。
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "time", "sync", "macros", "test-util"] }
+
+# transport-error-scrub 单元（L-7 脱敏收口）的测试目标显式命名，挂到 error_scrub.rs。
+[[test]]
+name = "transport-error-scrub"
+path = "tests/error_scrub.rs"
+
+# channel-health 单元（§3.4 健康事实视图，F-4 / L-8 / 单调性）的测试目标显式命名，挂到 health.rs。
+[[test]]
+name = "channel-health"
+path = "tests/health.rs"
+
+# byte-pump 单元（§3.2 双向桥接泵 / §3.6 并发模型，L-6 abort / F-4 死亡收口）的测试目标显式命名，挂到 pump.rs。
+[[test]]
+name = "byte-pump"
+path = "tests/pump.rs"
+
+# channel-assembly 单元（§3.1 三件套装配 / §3.5 优雅 close 幂等 + 强制 abort 砍在飞）的测试目标显式命名，挂到 chan.rs。
+[[test]]
+name = "channel-assembly"
+path = "tests/chan.rs"
+
+# ssh-ssm-placeholders 单元（§2 第6项 / §3.2 ssh·ssm / F-8 feature 门控）的测试目标显式命名，挂到 feature_gated.rs。
+[[test]]
+name = "ssh-ssm-placeholders"
+path = "tests/feature_gated.rs"
+
+# direct-transport 单元（§3.2 direct / §5.1 Transport 实现，F-1/F-6/L-1/L-2/L-5）的测试目标显式命名，挂到 direct.rs。
+[[test]]
+name = "direct-transport"
+path = "tests/direct.rs"
