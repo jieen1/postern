@@ -1,1 +1,8 @@
-[]
+[
+  {"file":"crates/postern-adapters/Cargo.toml",                 "reason":"sqlparser dep required for SQL semantic classification (design D5)"},
+  {"file":"crates/postern-adapters/tests/postgres_classify.rs", "reason":"SQL strings are classifier inputs (F-2~F-5, L-3~L-5)"},
+  {"file":"crates/postern-adapters/tests/postgres_constraint.rs","reason":"SQL-derived ClassifiedIntent fixtures (F-8, L-7/L-8)"},
+  {"file":"crates/postern-adapters/tests/postgres_execute.rs",  "reason":"real SQL drives engine-enforcement integration test (F-9)"},
+  {"file":"crates/postern-adapters/tests/postgres_intent.rs",   "reason":"postgres Intent payload carries raw SQL (F-12)"},
+  {"file":"crates/postern-adapters/tests/disguise_corpus.rs",   "reason":"disguise-attack SQL corpus as classifier inputs (L-1/L-2/L-6)"}
+]
