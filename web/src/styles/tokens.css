@@ -1,0 +1,95 @@
+/*
+ * Design tokens — authoritative implementation of 设计系统 §3.
+ *
+ * All visual values live here as CSS variables; tailwind.config.ts only maps
+ * these names into utilities. Dark is the default (运维夜间友好); light is an
+ * optional override applied via [data-theme="light"]. Semantic status colors
+ * (--allow/--deny/...) have FIXED meaning and must never be reused as
+ * decoration (§3.1).
+ */
+
+:root,
+[data-theme='dark'] {
+  /* Neutrals (§3.1) — dark default. */
+  --bg: #0d1117;
+  --surface: #161b22;
+  --surface-2: #1c2330;
+  --border: #2a313c;
+  --text: #e6edf3;
+  --text-muted: #8b949e;
+
+  /* Semantic status (§3.1) — fixed meaning. */
+  --allow: #2ea043; /* allow / healthy / PASS / effective */
+  --deny: #f85149; /* deny / error / FAIL / revoked / destroy */
+  --warn: #d29922; /* escalate / near-expiry / degraded / maintain */
+  --info: #58a6ff; /* info / link / observe */
+  --freeze: #da3633; /* freeze banner only — highest visual priority */
+
+  /* Capability verb colors (§3.1) — danger ascends with color temp. */
+  --cap-observe: #6e7b91; /* blue-gray */
+  --cap-query: #58a6ff; /* blue */
+  --cap-mutate: #d29922; /* amber */
+  --cap-execute: #db6d28; /* orange */
+  --cap-manage: #a371f7; /* purple */
+  --cap-destroy: #f85149; /* red */
+
+  /* Mode colors (§3.1). */
+  --mode-normal: #6e7b91;
+  --mode-observe: #58a6ff;
+  --mode-maintain: #d29922;
+  --mode-freeze: #da3633;
+
+  /* Spacing (§3.3) — 4-based scale. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* Radius (§3.3). */
+  --radius-card: 6px;
+  --radius-badge: 4px;
+
+  /* Typography (§3.2). */
+  --font-sans:
+    'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue',
+    Arial, sans-serif;
+  --font-mono:
+    'JetBrains Mono', ui-monospace, 'SF Mono', 'Cascadia Code', Menlo, Consolas,
+    monospace;
+
+  /* Subtle layering — dark uses borders + faint inner glow, few shadows. */
+  --shadow-card: 0 0 0 1px var(--border);
+  --glow-focus: 0 0 0 2px color-mix(in srgb, var(--info) 55%, transparent);
+}
+
+[data-theme='light'] {
+  --bg: #f6f8fa;
+  --surface: #ffffff;
+  --surface-2: #f0f3f6;
+  --border: #d0d7de;
+  --text: #1f2328;
+  --text-muted: #636c76;
+
+  --allow: #1a7f37;
+  --deny: #cf222e;
+  --warn: #9a6700;
+  --info: #0969da;
+  --freeze: #cf222e;
+
+  --cap-observe: #57606a;
+  --cap-query: #0969da;
+  --cap-mutate: #9a6700;
+  --cap-execute: #bc4c00;
+  --cap-manage: #8250df;
+  --cap-destroy: #cf222e;
+
+  --mode-normal: #57606a;
+  --mode-observe: #0969da;
+  --mode-maintain: #9a6700;
+  --mode-freeze: #cf222e;
+
+  --shadow-card: 0 1px 2px rgba(31, 35, 40, 0.08);
+  --glow-focus: 0 0 0 2px color-mix(in srgb, var(--info) 45%, transparent);
+}
