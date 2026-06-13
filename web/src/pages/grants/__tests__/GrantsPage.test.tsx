@@ -143,6 +143,50 @@ describe('GrantsPage — Principal 选择 + policy_rev 对账锚点', () => {
   });
 });
 
+describe('GrantsPage — 跨页深链预填 (?principal & ?resource 回显该格)', () => {
+  it('prefills the principal selector and resource filter from the URL, echoing the linked cell', async () => {
+    useGrantsHandler(liveGrants);
+    // Deep link from Denials: ?principal=alice (the SECOND principal, not the
+    // default first) + ?resource=db-main (a real resource substring).
+    renderWithProviders(<GrantsPage />, ['/grants?principal=alice&resource=db-main']);
+
+    const select = (await screen.findByLabelText('选择 Principal')) as HTMLSelectElement;
+    // The selector resolves to the deep-linked principal once principals load,
+    // NOT the default first principal.
+    await waitFor(() => expect(select.value).toBe('alice'));
+
+    // The resource filter is prefilled from ?resource …
+    expect((screen.getByLabelText('资源代号筛选') as HTMLInputElement).value).toBe('db-main');
+
+    // … and the matrix converges to the linked resource (db-main remains,
+    // redis-main is filtered out by the prefilled substring).
+    const matrix = await waitForMatrix();
+    expect(within(matrix).getByText('db-main')).toBeInTheDocument();
+    expect(within(matrix).queryByText('redis-main')).not.toBeInTheDocument();
+  });
+
+  it('falls back to the default principal when the deep-linked principal is unknown', async () => {
+    useGrantsHandler(liveGrants);
+    // ?principal points at a principal that is NOT in the loaded list.
+    renderWithProviders(<GrantsPage />, ['/grants?principal=ghost-not-real&resource=db']);
+
+    const select = (await screen.findByLabelText('选择 Principal')) as HTMLSelectElement;
+    // Unknown principal → fall back to the default first principal (no phantom).
+    await waitFor(() => expect(select.value).toBe('agent-order-bot'));
+    // The resource filter still honors ?resource regardless of the principal.
+    expect((screen.getByLabelText('资源代号筛选') as HTMLInputElement).value).toBe('db');
+  });
+
+  it('keeps the current default when no URL params are present', async () => {
+    useGrantsHandler(liveGrants);
+    renderWithProviders(<GrantsPage />); // no query string
+
+    const select = (await screen.findByLabelText('选择 Principal')) as HTMLSelectElement;
+    await waitFor(() => expect(select.value).toBe('agent-order-bot'));
+    expect((screen.getByLabelText('资源代号筛选') as HTMLInputElement).value).toBe('');
+  });
+});
+
 describe('GrantsPage — Elevate 写流程 (TTL 必填 → 摘要 → 危险确认)', () => {
   it('blocks submit without a valid TTL and surfaces the Zod message', async () => {
     useGrantsHandler(liveGrants);

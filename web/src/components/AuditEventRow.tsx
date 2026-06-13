@@ -4,6 +4,7 @@ import { CapabilityBadge } from './CapabilityBadge';
 import { DecisionBadge } from './DecisionBadge';
 import { ResourceCodeBadge } from './ResourceCodeBadge';
 import { SnowflakeId } from './SnowflakeId';
+import { StageChip } from './StageChip';
 import type { AuditEvent } from '../api/types';
 import { formatTime } from '../lib/format';
 
@@ -59,7 +60,12 @@ export function AuditEventRow({ pair }: { pair: AuditPair }) {
         <span className="text-sm">{head.principal ?? '—'}</span>
         <ResourceCodeBadge code={head.resource} />
         {head.capability && <CapabilityBadge capability={head.capability} />}
-        <DecisionBadge decision={head.decision} stage={head.stage} reason={head.reason} />
+        <DecisionBadge
+          decision={head.decision}
+          stage={head.stage}
+          reason={head.reason}
+          expandable={false}
+        />
         {orphan && (
           <span className="rounded-badge border border-warn/40 px-2 py-0.5 text-xs text-warn">
             intent only
@@ -90,6 +96,12 @@ export function AuditEventRow({ pair }: { pair: AuditPair }) {
             <KV k="duration_ms" v={String(pair.outcome.duration_ms)} />
           )}
           {head.objects.length > 0 && <KV k="objects" v={head.objects.join(', ')} mono />}
+          {head.stage && (
+            <div className="flex items-center gap-2">
+              <span className="font-mono text-text-muted">stage</span>
+              <StageChip stage={head.stage} />
+            </div>
+          )}
           {head.reason && <KV k="reason" v={head.reason} mono />}
         </div>
       )}

@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { RefreshCw } from 'lucide-react';
 import {
   ConfirmDialog,
@@ -37,8 +38,15 @@ import { ttlToMs, type ElevateForm } from './elevateSchema';
  * verbatim; absence == default deny; out-of-scope is indistinguishable.
  */
 export function GrantsPage() {
-  const [principal, setPrincipal] = useState<string | undefined>(undefined);
-  const [resourceFilter, setResourceFilter] = useState('');
+  // Cross-page deep link (web/docs/05-grants.md): Denials jumps here with
+  // /grants?principal=<p>&resource=<r> to echo that exact cell. Read the params
+  // once as initial state; the user can freely change both afterwards.
+  const [searchParams] = useSearchParams();
+  const linkedPrincipal = searchParams.get('principal') ?? undefined;
+  const linkedResource = searchParams.get('resource') ?? '';
+
+  const [principal, setPrincipal] = useState<string | undefined>(linkedPrincipal);
+  const [resourceFilter, setResourceFilter] = useState(linkedResource);
   const [onlyGranted, setOnlyGranted] = useState(false);
   const [tempPage, setTempPage] = useState<PageQuery>({ page_no: 1, page_size: 20 });
 
@@ -46,15 +54,25 @@ export function GrantsPage() {
   const now = Date.now();
 
   const principalsQuery = usePrincipals({ page_no: 1, page_size: 200 });
-  const grantsQuery = useGrants(principal, tempPage);
   const healthQuery = useHealth();
+
+  // Default the principal selector to the first principal once loaded. A
+  // deep-linked principal is only honored once it's confirmed to exist in the
+  // loaded list; an unknown one falls back to the default (no phantom value).
+  const principalOptions = principalsQuery.data?.items ?? [];
+  const knownPrincipal =
+    principal !== undefined && principalOptions.some((p) => p.name === principal)
+      ? principal
+      : undefined;
+
+  // Query grants for the validated principal (undefined ⇒ daemon's default),
+  // so the matrix always matches the principal the selector shows.
+  const grantsQuery = useGrants(knownPrincipal, tempPage);
 
   const elevate = useElevateGrant();
   const revoke = useRevokeGrant();
 
-  // Default the principal selector to the first principal once loaded.
-  const principalOptions = principalsQuery.data?.items ?? [];
-  const selectedPrincipal = principal ?? principalOptions[0]?.name;
+  const selectedPrincipal = knownPrincipal ?? principalOptions[0]?.name;
 
   // Drawers / dialogs.
   const [cellDrawer, setCellDrawer] = useState<MatrixCell | null>(null);

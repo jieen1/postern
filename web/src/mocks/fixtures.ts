@@ -187,6 +187,28 @@ export const verifyReport: VerifyReport = {
   ],
 };
 
+/**
+ * One-FAIL variant of {@link verifyReport}: probe ⑤
+ * `default_deny_unknown_resource` reports a verbatim existence-leak `gap_note`.
+ * Only the static browser MSW serves this (gated on an e2e localStorage flag,
+ * see handlers.ts) so the in-browser suite can exercise the security-load-bearing
+ * FAIL render — the verdict flip, auto-expanded red row, and verbatim gap_note —
+ * which the all-pass default fixture can never make observable.
+ */
+export const verifyReportOneFail: VerifyReport = {
+  all_pass: false,
+  items: verifyReport.items.map((it) =>
+    it.name === 'default_deny_unknown_resource'
+      ? {
+          name: 'default_deny_unknown_resource',
+          pass: false,
+          gap_note:
+            "拒绝响应泄露了资源 'nonexistent-probe-target' 的存在性(your_grants 含被探测代号)",
+        }
+      : { ...it },
+  ),
+};
+
 export const grantsView: GrantsView = {
   your_grants: {
     'db-main': ['observe', 'query'],

@@ -28,6 +28,24 @@ function paged<T>(url: URL, items: T[]): Page<T> {
 let rev = 4187;
 const nextRev = () => ({ policy_rev: String(++rev) });
 
+/**
+ * E2E-only escape hatch: when the browser worker runs (real DOM), the e2e suite
+ * sets `localStorage['__e2e_verify_fail__']` to make the next POST /v1/verify
+ * return the one-FAIL report so the security-load-bearing FAIL render is
+ * observable in a real browser. Guarded so it is a no-op under the Node test
+ * server (vitest), which has no `localStorage` and keeps using server.use().
+ */
+function e2eVerifyFail(): boolean {
+  try {
+    return (
+      typeof localStorage !== 'undefined' &&
+      localStorage.getItem('__e2e_verify_fail__') === '1'
+    );
+  } catch {
+    return false;
+  }
+}
+
 export const handlers = [
   // ── 健康 / 模式 ──
   http.get(`${BASE}/health`, () => HttpResponse.json(fx.health)),
@@ -46,7 +64,9 @@ export const handlers = [
   http.get(`${BASE}/denials/summary`, ({ request }) =>
     HttpResponse.json(paged(new URL(request.url), fx.denialsSummary)),
   ),
-  http.post(`${BASE}/verify`, () => HttpResponse.json(fx.verifyReport)),
+  http.post(`${BASE}/verify`, () =>
+    HttpResponse.json(e2eVerifyFail() ? fx.verifyReportOneFail : fx.verifyReport),
+  ),
 
   // ── 授权 ──
   http.get(`${BASE}/grants`, () => HttpResponse.json(fx.grantsView)),
