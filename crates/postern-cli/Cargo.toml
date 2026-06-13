@@ -3,9 +3,29 @@ name = "postern-cli"
 version = "0.1.0"
 edition = "2021"
 
+# 依赖纪律（07-postern-cli §6.1/§6.4、契约 ARCH_FORBIDDEN_EDGES）：仅依赖 core（共享
+# 请求/响应/分页 DTO）加 HTTP-over-UDS 客户端栈（hyper、hyperlocal）、clap、tokio、
+# serde/serde_json/thiserror。禁止边 cli ↛ store/secrets：不依赖 postern-store /
+# postern-secrets；亦不引入任何被封禁的 id 生成库与裸数据库驱动 / SQL 解析库。
 [dependencies]
 postern-core = { path = "../postern-core" }
+clap = { version = "4", features = ["derive"] }
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+hyperlocal = "0.9"
+http-body-util = "0.1"
+bytes = "1"
+tokio = { version = "1", features = ["rt", "macros", "io-util", "io-std", "net", "time"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2"
 
 [[bin]]
 name = "postern"
 path = "src/main.rs"
+
+# 接入向导（§3.7）行为测试：测试源 tests/init.rs，测试目标名 init_wizard（与 W2C 单元
+# 命名一致，供 `cargo test --test init_wizard` 驱动）。
+[[test]]
+name = "init_wizard"
+path = "tests/init.rs"
