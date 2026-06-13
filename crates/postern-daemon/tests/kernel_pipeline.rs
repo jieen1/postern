@@ -1303,9 +1303,10 @@ async fn escalate_with_approval_closed_folds_to_deny_never_suspends() {
 #[tokio::test]
 async fn out_of_scope_and_nonexistent_yield_identical_rbac_deny() {
     // 两次请求都用 principal=99（快照只给 42），分别打 in-scope-existing 与 nonexistent 资源代号。
-    // 返回 (DenyResponse 本体, 审计 (decision,stage) 序)：L-13 验收口径是**两次 DenyResponse
-    // 完全相同/不可区分**，故必须把 DenyResponse 本体（含 your_grants/reason/denied）一并捕获
-    // 比对，绝不可只比对审计 stage 向量（那会放过 your_grants/reason/denied.resource 泄露存在性）。
+    // 返回 (DenyResponse 本体, 审计 (decision,stage) 序)：L-13 验收口径是**两次 DenyResponse 在
+    // 存在性敏感字段上不可区分**（your_grants/reason/request_hint/denied.capability/denied.objects），
+    // 故必须把 DenyResponse 本体一并捕获比对，绝不可只比对审计 stage 向量（那会放过这些字段泄露
+    // 存在性）。denied.resource 例外：机械回显请求代号，零存在性泄露，见下方承重断言。
     async fn deny_for(resource_code: &str) -> (DenyResponse, Vec<(String, Option<Stage>)>) {
         let log = Arc::new(CallLog::default());
         let auth = FakeAuth {
@@ -1373,14 +1374,45 @@ async fn out_of_scope_and_nonexistent_yield_identical_rbac_deny() {
         "越界但存在 与 不存在 须产出不可区分的审计 stage（L-13：不泄露存在性）"
     );
 
-    // 承重断言：L-13 验收口径是「两次 DenyResponse **完全相同 / 不可区分**」，而不仅是审计
-    // stage 相同。直接逐字段比对 DenyResponse 本体——其 your_grants / reason / denied.resource
-    // / request_hint 任一在「越界（资源存在）」与「不存在」之间出现差异，即泄露资源存在性，
-    // 本断言失败。仅比审计 stage 会放过这类真实回归（旧断言的口径偷换）。
+    // 承重断言：L-13 验收口径是「越界但存在」与「根本不存在」对**同一探测代号**不可区分——
+    // 即攻击者无法据 deny 响应区分「存在但越权」与「资源不存在」。其安全实质落在**存在性敏感
+    // 字段**：your_grants / request_hint / reason / denied.capability / denied.objects。这些字段
+    // 任一在两路出现差异即泄露资源存在性，故须逐一相等。
+    //
+    // 唯一例外是 denied.resource：core 文档钉死其语义为「Resource the request targeted」——它机械
+    // 回显**攻击者自己输入的请求代号**（db-main / ghost-xyz），零存在性泄露（攻击者输入什么就
+    // 回显什么，不查表、不泄露快照拓扑）。故两路 denied.resource **各自等于其请求代号**、并不相等，
+    // 这正确而非缺陷；旧断言只因 kernel bug 抹空 denied.resource 才整体相等，是过强（口径错位）。
     assert_eq!(
-        existing_deny, nonexistent_deny,
-        "越界但存在 与 不存在 须产出**完全相同**的 DenyResponse（含 your_grants/reason/denied/\
-         request_hint），逐字段不可区分（L-13：不泄露存在性）"
+        existing_deny.your_grants, nonexistent_deny.your_grants,
+        "L-13：your_grants 两路须不可区分（不泄露存在性）"
+    );
+    assert_eq!(
+        existing_deny.request_hint, nonexistent_deny.request_hint,
+        "L-13：request_hint 两路须不可区分（均 None，不暗示可授性/存在性）"
+    );
+    assert_eq!(
+        existing_deny.reason, nonexistent_deny.reason,
+        "L-13：reason 两路须不可区分（不泄露存在性）"
+    );
+    assert_eq!(
+        existing_deny.denied.capability, nonexistent_deny.denied.capability,
+        "L-13：denied.capability 两路须不可区分（源自请求方意图，非快照查表）"
+    );
+    assert_eq!(
+        existing_deny.denied.objects, nonexistent_deny.denied.objects,
+        "L-13：denied.objects 两路须不可区分（源自请求方意图，非快照查表）"
+    );
+    // denied.resource 机械回显各自请求代号（攻击者自己的输入），不相等且正确。
+    assert_eq!(
+        existing_deny.denied.resource.as_str(),
+        RESOURCE,
+        "denied.resource 机械回显请求代号 db-main（攻击者输入，零存在性泄露）"
+    );
+    assert_eq!(
+        nonexistent_deny.denied.resource.as_str(),
+        "ghost-xyz",
+        "denied.resource 机械回显请求代号 ghost-xyz（攻击者输入，零存在性泄露）"
     );
     // 并显式钉住 stage=rbac 的承载事实：denied.capability/objects 与 reason 均为 rbac 缺格
     // 形态，且 your_grants 只含 principal 自身授权世界（此处 principal=99 在快照无任何格 →
@@ -1392,6 +1424,97 @@ async fn out_of_scope_and_nonexistent_yield_identical_rbac_deny() {
     assert_eq!(
         existing_deny.decision, "deny",
         "L-13 两路均为普通 deny（非 escalate_denied）"
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  deny 归因（已认证、持授权格的 principal 越权）：kernel 出口须沿用求值器已正确归因的
+//  DenyResponse —— your_grants 反映该 principal 真实授权世界、denied.resource = 请求代号
+// ════════════════════════════════════════════════════════════════════════════
+
+// 求值后 deny 的归因咬合：principal=42 持 (db-main, Query) 授权格，但请求 db-main 的 **Mutate**
+// （越权）→ RBAC 缺格 deny。kernel 边界回出的 DenyResponse 必须是求值器已正确归因的那一个：
+//   - denied.resource == 请求资源代号 db-main（**非空串**）；
+//   - your_grants == 该 principal 自身授权世界，含 {db-main:[query]}；
+//   - stage == rbac。
+// 在未修复实现下，kernel 丢弃求值器的 DenyResponse、以 unattributed() 零 principal + 空代号
+// 重组 → denied.resource 恒空串、your_grants 恒空 → 本测试红。修复后转绿（证明测试咬住缺陷）。
+#[tokio::test]
+async fn post_eval_deny_carries_evaluator_attribution_resource_and_grants() {
+    let log = Arc::new(CallLog::default());
+    let p = principal(42);
+    // 快照给 principal=42 一个 (db-main, Query) 的 Allow 格（其真实授权世界）。
+    let snapshot = Arc::new(allow_snapshot(p, Capability::Query, "readonly"));
+    let auth = FakeAuth {
+        kind: AUTH_KIND,
+        outcome: Ok(p),
+        log: log.clone(),
+    };
+    let pred = FakePredicate {
+        kind: COND_KIND,
+        verdict: Ok(true),
+        log: log.clone(),
+    };
+    // 适配器把请求归类为 **Mutate**（越权：42 只持 query 格）→ (db-main, Mutate) 缺格。
+    let adapter = FakeAdapter {
+        classify: Ok(FakeAdapter::classified(Capability::Mutate)),
+        constraint: Ok(true),
+        execute: Mutex::new(Some(Ok(RawResponse {
+            payload: Vec::new(),
+        }))),
+        log: log.clone(),
+    };
+    let eval = Arc::new(evaluator(auth, pred));
+    let adapters = Arc::new(postern_daemon::registry::AdapterRegistry::new(vec![
+        Box::new(adapter) as Box<dyn Adapter>,
+    ]));
+    let audit = Arc::new(FakeAudit::ok(log.clone()));
+    let kernel = Kernel::new(
+        eval,
+        adapters,
+        Arc::new(FakeAcquire::ok(log.clone())) as Arc<dyn ConnAcquire>,
+        audit.clone() as Arc<dyn AuditSink>,
+        Arc::new(FakeSanitizer { log: log.clone() }) as Arc<dyn Sanitizer>,
+        snapshot,
+        now(),
+    );
+
+    let out = kernel.submit(request()).await;
+    let deny = match out {
+        Err(d) => d,
+        Ok(_) => panic!("越权 mutate（42 仅持 query 格）应 deny"),
+    };
+
+    // denied.resource 必为请求资源代号 db-main（机械回显请求代号，非空串）。
+    assert_eq!(
+        deny.denied.resource,
+        ResourceCode::new(RESOURCE),
+        "求值后 deny 的 denied.resource 须为请求资源代号 db-main（非空串）——\
+         kernel 须沿用求值器已正确归因的 DenyResponse，绝不用空代号兜底重组"
+    );
+    // denied.capability 为被请求的真实动词 Mutate（归类已穿透，归因不丢动词）。
+    assert_eq!(
+        deny.denied.capability,
+        Capability::Mutate,
+        "求值后 deny 的归因动词须为被请求的 Mutate"
+    );
+    // your_grants 必反映 principal=42 真实授权世界，含 {db-main:[query]}。
+    let caps = deny
+        .your_grants
+        .get(&ResourceCode::new(RESOURCE))
+        .expect("your_grants 须含 principal 自身已授的 db-main 格（kernel 须沿用求值器归因）");
+    assert_eq!(
+        caps,
+        &vec!["query".to_string()],
+        "your_grants 须只列 principal=42 真实已授的 query 格（不泄露被探测 mutate）"
+    );
+    // stage=rbac（越权动词缺格拒），由审计读回。
+    assert!(
+        audit
+            .recorded()
+            .iter()
+            .any(|(_d, s)| *s == Some(Stage::Rbac)),
+        "越权 mutate deny 的审计 stage 必为 Stage::Rbac"
     );
 }
 

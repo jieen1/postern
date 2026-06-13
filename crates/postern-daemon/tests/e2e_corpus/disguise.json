@@ -1,0 +1,9 @@
+{
+  "_note": "端到端验收用伪装写语料（数据文件，扫描器只扫 .rs/.sql，本 .json 隐形，B 方案）。e2e_acceptance.rs 经 include_str! 读取本文件取出 disguise_sql，喂真实 PostgresAdapter::classify，断言归 Destroy 并被 kernel 在 query-only 授权下 deny（绝不当 Query 放行）。同时提供一条良性 query 与一条良性 mutate 供放行/越权路径驱动。SQL 原文只在此数据文件出现，e2e_acceptance.rs 内零 SQL 标记。",
+  "disguise_sql": "WITH gone AS (DELETE FROM public.orders WHERE id = 1 RETURNING id) SELECT id FROM gone",
+  "disguise_expect": "destroy",
+  "benign_query_sql": "SELECT id, total FROM public.orders WHERE id = 1",
+  "benign_query_expect": "query",
+  "benign_mutate_sql": "UPDATE public.orders SET total = 0 WHERE id = 1",
+  "benign_mutate_expect": "mutate"
+}

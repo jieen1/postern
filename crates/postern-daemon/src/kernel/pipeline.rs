@@ -136,8 +136,11 @@ impl Kernel {
         let (grant, tier) = match decision {
             Decision::Allow { grant, tier } => (grant, tier),
             // evaluate 的 escalate 折叠也落在 Deny（轨迹截止于 Tier，detail 以 "escalate" 起
-            // 头）；据轨迹区分 escalate_denied 与普通 deny，并取截止步 stage 入审计。
-            Decision::Deny(_) | Decision::Escalate { .. } => {
+            // 头）；据轨迹区分 escalate_denied 与普通 deny，并取截止步 stage 入审计。已认证、
+            // 持授权格：求值器已据真实 principal + 请求资源把 DenyResponse 正确归因
+            //（your_grants=该 principal 自身授权世界、denied.resource=请求代号），故**沿用**它，
+            // 绝不用 unattributed() 零 principal 重组（那会抹掉归因）。
+            Decision::Deny(dr) | Decision::Escalate { fallback: dr } => {
                 let stage = match trace.final_stage() {
                     Some(s) => s,
                     None => Stage::Rbac,
@@ -147,7 +150,7 @@ impl Kernel {
                 } else {
                     "deny"
                 };
-                return self.deny(stage, ci, word).await;
+                return self.deny_with(dr, stage, word).await;
             }
         };
 
@@ -345,6 +348,31 @@ impl Kernel {
         Err(response)
     }
 
+    /// 求值后拒绝出口（已认证、持授权格）：**沿用**求值器交回的已正确归因 `DenyResponse`
+    /// （your_grants=该 principal 自身授权世界、denied.resource=请求代号），经同一 `Sanitizer`
+    /// 出口脱敏 + 审计（带 stage 归因 + decision 词），回 `Err(response)`。**绝不**用
+    /// unattributed() 零 principal 重组（那会抹掉求值器的正确归因）。
+    ///
+    /// 与 `deny`（求值前的 classify/constraint 阶用 unattributed 重组，归因正确）互补：本路径
+    /// 拒绝发生在 evaluate 之后，求值器已据真实 principal 把归因建好，kernel 只搬运、不重组。
+    async fn deny_with(
+        &self,
+        response: DenyResponse,
+        stage: Stage,
+        decision_word: &str,
+    ) -> Result<SanitizedResponse, DenyResponse> {
+        // 出口统一脱敏：把求值器交回的结构化 deny 过一遍同一 Sanitizer（结构化 deny 本体仍按
+        // §8 F-10 以 Err(DenyResponse) 上抛）。
+        self.scrub_response(&response);
+        // 审计该 deny：stage 归因 + decision 词（escalate_denied 区别于普通 deny）；resource/
+        // capability/objects 取自求值器已归因的 response.denied（非快照兜底）。
+        let event = self.deny_event_from(&response, stage, decision_word);
+        // deny 审计写失败本身不改判定（已是 deny，fail-closed 终态）：显式吸收其结果，绝不吞错
+        // 改路放行。无论写痕成败，本路径恒回 Err(DenyResponse)。
+        let _audited = self.audit.record_read(event).await;
+        Err(response)
+    }
+
     /// 已尝试过审计写（且失败）的拒绝出口：组装 + 出口脱敏，但**不再写一条审计**（避免对同一
     /// 失败汇重复写、并守 L-3 第②分支「意图痕只写一次」）。仍回 `Err(DenyResponse)`。
     async fn deny_egress_only(
@@ -366,17 +394,22 @@ impl Kernel {
             &ci.objects,
             format!("denied at {}", stage.as_str()),
         );
-        // 出口统一脱敏：deny 文案在跨边界前过同一 Sanitizer（即便结构化 deny 另行上抛）。
-        // 序列化失败（不会发生于纯 serde 结构）亦 fail-closed：以空字节仍走一遍脱敏，绝不
-        // 因此放行或改路。
+        self.scrub_response(&response);
+        response
+    }
+
+    /// 把结构化 deny 的字节过一遍同一 `Sanitizer`（统一出口不变量），不改 response 本体。
+    ///
+    /// 序列化失败（不会发生于纯 serde 结构）亦 fail-closed：以空字节仍走一遍脱敏，绝不因此
+    /// 放行或改路。
+    fn scrub_response(&self, response: &DenyResponse) {
         let mut bytes = Vec::new();
-        if let Ok(serialized) = serde_json::to_vec(&response) {
+        if let Ok(serialized) = serde_json::to_vec(response) {
             bytes = serialized;
         }
         let _scrubbed = self
             .sanitizer
             .scrub(RawResponse { payload: bytes }, &self.mask_rules());
-        response
     }
 
     /// 组装放行/意图痕审计事件（capability 已归类、grant 已命中）。
@@ -424,6 +457,33 @@ impl Kernel {
             decision: decision_word.to_string(),
             stage: Some(stage),
             reason: reason.to_string(),
+            policy_rev: self.snapshot.policy_rev,
+        }
+    }
+
+    /// 由求值器已归因的 `DenyResponse` 组装 deny 审计事件（带 stage 归因 + decision 词）。
+    ///
+    /// resource/capability/objects 取自 `response.denied`（求值器已据真实 principal + 请求资源
+    /// 归因），reason 取自 `response.reason`——绝不退化用快照空代号兜底（与求值前 `deny_event`
+    /// 的 unattributed 路径互补）。
+    fn deny_event_from(
+        &self,
+        response: &DenyResponse,
+        stage: Stage,
+        decision_word: &str,
+    ) -> AuditEvent {
+        AuditEvent {
+            v: 1,
+            kind: "request".to_string(),
+            entry: "data".to_string(),
+            origin: self.placeholder_origin(),
+            principal: None,
+            resource: response.denied.resource.clone(),
+            capability: Some(response.denied.capability),
+            objects: response.denied.objects.clone(),
+            decision: decision_word.to_string(),
+            stage: Some(stage),
+            reason: response.reason.clone(),
             policy_rev: self.snapshot.policy_rev,
         }
     }
