@@ -368,7 +368,7 @@ fn settings_upsert_by_key_advances_version() {
 
     let set_v1 = WriteIntent {
         entity: "settings",
-        fields: serde_json::json!({ "key": "approvals.enabled", "value": "false" }),
+        fields: serde_json::json!({ "key": "approval.enabled", "value": "false" }),
         expected_version: None,
     };
     let first = adapter
@@ -378,7 +378,7 @@ fn settings_upsert_by_key_advances_version() {
 
     let set_v2 = WriteIntent {
         entity: "settings",
-        fields: serde_json::json!({ "key": "approvals.enabled", "value": "true" }),
+        fields: serde_json::json!({ "key": "approval.enabled", "value": "true" }),
         expected_version: None,
     };
     let second = adapter
@@ -386,19 +386,57 @@ fn settings_upsert_by_key_advances_version() {
         .expect("setting upsert commits");
     assert_eq!(second.version, 1, "同 key 二次写 ⇒ upsert version = 0 + 1");
 
+    // 列读 = 已知设置目录叠加 store 持有值：固定小集（目录全员），持久化的 key 出存值 + version。
     let page = adapter
         .list("settings", full_page())
         .expect("list settings");
-    assert_eq!(page.items.len(), 1, "upsert by key ⇒ 同 key 仍一行");
+    let enabled = page
+        .items
+        .iter()
+        .find(|r| r.get("key").and_then(|v| v.as_str()) == Some("approval.enabled"))
+        .expect("目录含 approval.enabled");
     assert_eq!(
-        page.items[0].get("value").and_then(|v| v.as_str()),
+        enabled.get("value").and_then(|v| v.as_str()),
         Some("true"),
-        "就地改 value 为 true"
+        "持久化值叠加进目录：就地改 value 为 true"
     );
     assert_eq!(
-        page.items[0].get("key").and_then(|v| v.as_str()),
-        Some("approvals.enabled"),
-        "key 如实投影"
+        enabled.get("version").and_then(|v| v.as_i64()),
+        Some(1),
+        "version 随 upsert 前进"
+    );
+    // 元数据由目录定义、不入库：default / writable / kind 恒随每行出线。
+    assert_eq!(
+        enabled.get("default").and_then(|v| v.as_str()),
+        Some("false"),
+        "approval.enabled 目录默认值 false"
+    );
+    assert_eq!(
+        enabled.get("kind").and_then(|v| v.as_str()),
+        Some("bool"),
+        "approval.enabled 类型 bool"
+    );
+    assert_eq!(
+        enabled.get("writable").and_then(|v| v.as_bool()),
+        Some(true),
+        "approval.enabled 可写"
+    );
+
+    // 未持久化的 key 仍出目录默认值 + version 0；on_timeout 恒不可写（L-12）。
+    let on_timeout = page
+        .items
+        .iter()
+        .find(|r| r.get("key").and_then(|v| v.as_str()) == Some("approval.on_timeout"))
+        .expect("目录含 approval.on_timeout");
+    assert_eq!(
+        on_timeout.get("value").and_then(|v| v.as_str()),
+        Some("deny"),
+        "未持久化 ⇒ 出目录默认值 deny"
+    );
+    assert_eq!(
+        on_timeout.get("writable").and_then(|v| v.as_bool()),
+        Some(false),
+        "approval.on_timeout 恒不可写（L-12）"
     );
 }
 

@@ -544,15 +544,66 @@ fn list_deny_notes(
     })
 }
 
-/// settings 列读：store `list_settings` → `Page`（`key`/`value`/`version`；元数据由 daemon 定义）。
+/// 已知设置项目录：`(key, default, writable, kind)`。元数据（默认值 / 是否可写 / 类型）由
+/// daemon 按已知 key 定义、不入库（store 只承载 `key`/`value`/`version`）；前端按此固定 key 集
+/// 渲染（types.ts `SettingRow`），未列出的 key 为系统未知 key、不在此出现。
+///
+/// 纪律：`approval.on_timeout` 恒为 `deny` 且 **不可写**（L-12，ESCALATE_FOLDS_TO_DENY 的配置面
+/// 体现——审批超时处置永不可被改成放行）。`audit.fsync` 缺省 `always`、`audit.retention_days`
+/// 缺省 `30` 与 store 审计载体的同名缺省（`FsyncPolicy::PerEvent` / `DEFAULT_RETENTION_DAYS`）一致。
+const SETTINGS_CATALOG: &[(&str, &str, bool, &str)] = &[
+    ("approval.enabled", "false", true, "bool"),
+    ("approval.on_timeout", "deny", false, "enum"),
+    ("audit.fsync", "always", true, "enum"),
+    ("audit.retention_days", "30", true, "int"),
+    ("audit.exporter.otel.enabled", "false", true, "bool"),
+];
+
+/// settings 列读：已知设置目录（[`SETTINGS_CATALOG`]）叠加 store 持有值。
+///
+/// store `list_settings` 取持久化的 `key→(value, version)`，目录据此产出固定 key 集合的出线行：
+/// 已持久化的 key 出其存值 + version；未持久化的 key 出目录默认值 + version 0。元数据
+/// （default / writable / kind）恒由目录定义。settings 是固定小集（非 DataTable、无分页），故
+/// 一次出全（忽略入参分页页码）；store 侧以全局上限单页足以覆盖全部持久化 key。
 fn list_settings(
     inner: &StorePolicyRepo,
-    page: PageQuery,
+    _page: PageQuery,
 ) -> Result<Page<serde_json::Value>, DaemonError> {
-    project_page(inner.list_settings(page), |row| SettingDto {
-        key: row.key,
-        value: row.value,
-        version: row.version,
+    // 取全部持久化设置（固定小集，单页 MAX_SIZE 覆盖全部）：key → (value, version)。
+    let stored = inner
+        .list_settings(PageQuery {
+            page_no: 1,
+            page_size: PageQuery::MAX_SIZE,
+        })
+        .map_err(|_| DaemonError::Boot)?;
+    let mut by_key = std::collections::BTreeMap::new();
+    for row in stored.items {
+        by_key.insert(row.key, (row.value, row.version));
+    }
+
+    let mut items = Vec::with_capacity(SETTINGS_CATALOG.len());
+    for &(key, default, writable, kind) in SETTINGS_CATALOG {
+        let (value, version) = match by_key.get(key) {
+            Some((v, ver)) => (v.clone(), *ver),
+            None => (default.to_string(), 0),
+        };
+        let dto = SettingDto {
+            key: key.to_string(),
+            value,
+            default: default.to_string(),
+            writable,
+            version,
+            kind: kind.to_string(),
+        };
+        items.push(serde_json::to_value(dto).map_err(|_| DaemonError::Boot)?);
+    }
+
+    let total = items.len() as u64;
+    Ok(Page {
+        items,
+        page_no: 1,
+        page_size: SETTINGS_CATALOG.len() as u32,
+        total,
     })
 }
 

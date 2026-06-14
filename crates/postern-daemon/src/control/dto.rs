@@ -178,15 +178,22 @@ pub struct DenyNoteDto {
 }
 
 /// 设置项出线行（types.ts `SettingRow`）。store 只承载 `key`/`value`/`version`；元数据
-/// （`default`/`writable`/`kind`）由 daemon 按已知 key 定义、不入库，故本投影只出 store 持有列。
+/// （`default`/`writable`/`kind`）由 daemon 按已知 key 目录定义、不入库，列读时叠加产出
+/// （见 [`repo`](super::repo) 的 settings 目录-叠加投影）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettingDto {
     /// 业务键。
     pub key: String,
-    /// 当前值。
+    /// 当前值（store 持有值；未持久化时为目录默认值）。
     pub value: String,
-    /// 乐观锁版本。
+    /// 目录默认值（daemon 定义，不入库）。
+    pub default: String,
+    /// 是否可写（daemon 定义；`approval.on_timeout` 恒不可写，L-12）。
+    pub writable: bool,
+    /// 乐观锁版本（未持久化的 key 为 0）。
     pub version: i64,
+    /// 值类型（前端控件分流：`bool`/`enum`/`int`）。
+    pub kind: String,
 }
 
 /// 模式行出线行（types.ts `ModeStateRow` 的 store 持有列投影；`effective_mode` 由 mode 域 handler
