@@ -78,10 +78,22 @@ impl DaemonConfig {
 ///
 /// 与 cli `control_socket_path` 的缺省约定逐字一致（同 `XDG_RUNTIME_DIR/postern` 根、同
 /// `/run/postern` 兜底），使两端在未显式指定 socket 路径时落同一目录。纯路径推导、无 IO。
+#[cfg(unix)]
 pub fn runtime_base() -> PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR")
         .map(|dir| PathBuf::from(dir).join("postern"))
         .unwrap_or_else(|| PathBuf::from("/run/postern"))
+}
+
+/// Windows has no `XDG_RUNTIME_DIR` / `/run` — default under
+/// `%LOCALAPPDATA%\postern` (else `%USERPROFILE%\postern`) so `posternd.exe`
+/// runs with no env vars set. Pure path derivation, no IO.
+#[cfg(windows)]
+pub fn runtime_base() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|dir| PathBuf::from(dir).join("postern"))
+        .unwrap_or_else(|| PathBuf::from("postern"))
 }
 
 /// 手写 argv 子命令解析（**不引 clap**）：第一个非程序名参数为 `init` ⇒ [`Subcommand::Init`]，

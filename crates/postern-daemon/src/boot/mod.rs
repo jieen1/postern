@@ -335,6 +335,13 @@ pub async fn run() -> u8 {
         };
     }
 
+    // Windows 便利：双击（无子命令 ⇒ Run）首次未初始化时自动 init，让 posternd.exe 自足、
+    // 无需 .bat / 环境变量。Linux 不变（`run` 未 init 仍 fail-closed，由 boot 链短路）。
+    #[cfg(windows)]
+    if !cfg.keyfile_path.exists() && crate::bootstrap::init(&cfg).is_err() {
+        return EXIT_BOOT_FAILED;
+    }
+
     // 常规启动：构造四个 Real* 实现。
     let pre = real::RealPreconditions::new(
         cfg.db_path.clone(),

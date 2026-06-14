@@ -64,6 +64,21 @@ fn random_master_key() -> [u8; 32] {
 /// `KeyFile::new` / `Payload::write_atomic`（secrets API 强制 `Zeroizing` 参数），故 GREEN 阶段
 /// 须把 `zeroize` 从 `[dev-dependencies]` 移入 `[dependencies]`（见 notes 上报）。
 pub fn init(cfg: &DaemonConfig) -> Result<()> {
+    // 0) 确保目标文件的父目录存在（Windows 默认基底 %LOCALAPPDATA%\postern 首次不存在；
+    //    create_dir_all 幂等，Linux 上目录已在则 no-op）。真失败由后续写文件 fail-closed 暴露。
+    for p in [
+        &cfg.keyfile_path,
+        &cfg.vault_path,
+        &cfg.db_path,
+        &cfg.control_token_path,
+    ] {
+        if let Some(dir) = p.parent() {
+            if !dir.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+        }
+    }
+
     // 1) 幂等拒绝覆盖：四个目标文件任一已存在 ⇒ fail-closed（绝不毁现有主密钥 / vault / db /
     //    control-token）。control-token 一并纳入幂等门：重复 init 绝不重铸、不覆盖现有凭据。
     if cfg.keyfile_path.exists()
