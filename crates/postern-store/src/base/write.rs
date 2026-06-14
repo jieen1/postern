@@ -363,6 +363,56 @@ pub fn system_update(
     execute(txn, &sql, &bind)
 }
 
+/// 原子递增持久 `policy_rev`（单调策略修订号）：在调用方给定的写事务内，把
+/// `policy_meta` 中 `key = 'policy_rev'` 的 `value` 自增 1（缺失行——迁移后首次——视作
+/// 当前 0、落新值 1），返回**新** rev。单调、跨重启存活（持久落库）、绝不回退。
+///
+/// 写经唯一写路径（本文件，契约 `DB_WRITE_PATH_CENTRALIZED`），以 UPSERT 落值（缺失则插、
+/// 存在则改）；`policy_meta` 非业务表、无审计字段/逻辑删除语义，故不经 8 基础字段填充。
+/// 同事务内调用：rev 自增与触发它的实体写共用同一事务边界，要么同 COMMIT、要么同
+/// ROLLBACK（全或无，杜绝"写已落而 rev 未进"或反之）。写失败 → [`StoreError::Io`]。
+pub fn bump_policy_rev(txn: &Transaction<'_>) -> Result<u64, StoreError> {
+    // policy_meta 行的审计列（NOT NULL + CHECK length 24）由本写路径填充：created_by /
+    // updated_by 取系统标识、created_at / updated_at 取当前墙钟（与 audit sink 同源的
+    // 内部墙钟，policy_meta 非业务表故不经调用方注入的 now）。id 由 SQLite 自动分配
+    // （INTEGER PRIMARY KEY rowid），version / delete_flag / enable_flag 走列默认。
+    let ts = timestamp::format(Timestamp::from_unix_ms(now_unix_ms()));
+
+    // UPSERT：首次（缺行）插 value = 1；已存在则 value + 1、version 自增、updated_*
+    // 维护。冲突目标对齐 policy_meta 的 partial unique 索引（key WHERE delete_flag = 0）。
+    // RETURNING value 取本次落库的新 rev（插入分支返 1，更新分支返自增后值）。
+    let sql = format!(
+        "INSERT INTO {table} (created_at, created_by, updated_at, updated_by, key, value) \
+         VALUES (?1, ?2, ?1, ?2, ?3, 1) \
+         ON CONFLICT(key) WHERE delete_flag = 0 \
+         DO UPDATE SET value = value + 1, version = version + 1, \
+         updated_at = ?1, updated_by = ?2 \
+         RETURNING value",
+        table = crate::schema::POLICY_META_TABLE,
+    );
+
+    let new_rev: i64 = txn
+        .query_row(
+            &sql,
+            rusqlite::params![ts, SYSTEM_ACTOR, crate::schema::POLICY_REV_KEY],
+            |r| r.get(0),
+        )
+        .map_err(classify)?;
+
+    // value 列为单调非负序列；负值（不该出现）fail-closed 而非回绕为巨大 u64。
+    u64::try_from(new_rev).map_err(|_| StoreError::Io)
+}
+
+/// 内部墙钟（Unix 毫秒），仅供 `policy_meta` 审计列填充用（非业务时间、不经调用方注入
+/// 的 `now`）。早于 Unix 纪元（不可能的本地时钟）退化为 0。与 audit sink 内部墙钟同源。
+fn now_unix_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(elapsed) => u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        Err(_) => 0,
+    }
+}
+
 /// 把谓词里每个 `?`（无编号位置参数）顺序重编号为 `?N`，N 从 `idx` 续起，
 /// 使 SET 子句与谓词共享同一套绑定下标。已带编号的 `?N` 不在此处处理（调用方
 /// 用裸 `?` 或不带占位符的常量谓词，本 crate 测试即后者 `id = <literal>`）。

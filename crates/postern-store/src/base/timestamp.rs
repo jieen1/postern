@@ -31,9 +31,7 @@ pub fn format(ts: Timestamp) -> String {
     let (year, month, day) = civil_from_days(days);
 
     // 固定宽度、零填充：YYYY-MM-DDTHH:MM:SS.sssZ（恒 24 字节）。
-    format!(
-        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z"
-    )
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
 }
 
 /// 从 Unix 纪元起的天数换算公历 `(year, month, day)`。

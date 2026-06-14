@@ -6,10 +6,13 @@
 //! [`base::scope`](crate::base::scope) 的分页执行器（默认作用域 `delete_flag = 0`
 //! + `LIMIT`），返回携 `version` 的读模型行。
 
+use std::sync::Arc;
+
 use crate::base::db::Db;
 use crate::base::error::StoreError;
 use crate::base::scope::execute_page;
 use crate::base::write::{self, Actor, InsertRow};
+use crate::snapshot::{build_snapshot_on, SnapshotView};
 use postern_core::domain::Timestamp;
 use postern_core::id::{Clock, IdGen, SnowflakeId};
 use postern_core::page::{Page, PageQuery};
@@ -80,15 +83,45 @@ pub struct PolicyRepo {
     db: Db,
     idgen: IdGen,
     clock: Box<dyn Clock>,
+    /// 数据面消费的只读快照视图：写提交后在**同一写锁临界区**内经
+    /// [`commit_and_rebuild`](PolicyRepo::commit_and_rebuild) 原子 `replace`。boot 物化
+    /// 首份快照、`SnapshotView::new` 装配后注入此处，使写句柄成为快照重建的唯一驱动者
+    /// （单一权威状态，无双源，§7-13）。`None` 时该句柄不重建快照（仅 per-entity 写 + 读）。
+    view: Option<Arc<SnapshotView>>,
 }
 
 impl PolicyRepo {
-    /// 以已开/已迁移的 [`Db`]、core [`IdGen`] 与墙钟 [`Clock`] 装配句柄。
+    /// 以已开/已迁移的 [`Db`]、core [`IdGen`] 与墙钟 [`Clock`] 装配句柄（**不**持快照视图）。
     ///
     /// `clock` 是写入时 `now`（落 `created_at`/`updated_at`，经 `base` 唯一格式化点）的
-    /// 来源；`idgen` 是主键来源。二者注入使写行为可在测试里确定复现。
+    /// 来源；`idgen` 是主键来源。二者注入使写行为可在测试里确定复现。不持视图时
+    /// [`commit_and_rebuild`](PolicyRepo::commit_and_rebuild) 仍递增 rev、构建快照并返回，
+    /// 但不向任何 `SnapshotView` 发布（供仅需 per-entity 写的场景 / 既有调用点不破坏）。
     pub fn new(db: Db, idgen: IdGen, clock: Box<dyn Clock>) -> Self {
-        Self { db, idgen, clock }
+        Self {
+            db,
+            idgen,
+            clock,
+            view: None,
+        }
+    }
+
+    /// 以已开/已迁移的 [`Db`]、[`IdGen`]、[`Clock`] 与既有 [`SnapshotView`] 装配句柄
+    /// （持视图：写提交后在同一临界区内原子 `replace` 该视图）。
+    ///
+    /// **装配关系（谁持有 view / boot 怎么传入）**：boot 序列先 `migrate` → 以
+    /// 当前持久 `policy_rev` 物化首份 [`PolicySnapshot`](postern_core::domain::PolicySnapshot)
+    /// → `Arc::new(SnapshotView::new(Arc::new(first)))` 得唯一视图；该 `Arc<SnapshotView>`
+    /// 一份克隆注入数据面 router（只读消费），另一份经本构造器交给控制面写句柄（写后重建
+    /// 的唯一发布者）。二者共享同一 `arc-swap` 视图，故"写句柄 replace"对"数据面 snapshot()"
+    /// 即时可见，且全程无双源。
+    pub fn with_view(db: Db, idgen: IdGen, clock: Box<dyn Clock>, view: Arc<SnapshotView>) -> Self {
+        Self {
+            db,
+            idgen,
+            clock,
+            view: Some(view),
+        }
     }
 
     /// 借底层 [`Db`]（供测试在真实 SQLite 上核对落库形态；非跨 crate 公开语义）。
@@ -99,6 +132,51 @@ impl PolicyRepo {
     /// 当前写入墙钟：经 `base` 唯一格式化点落 `created_at`/`updated_at`。
     fn now(&self) -> Timestamp {
         Timestamp::from_unix_ms(self.clock.now_unix_ms())
+    }
+
+    /// 统一"提交 + 重建"编排（D2 写入主入口）：在**同一写锁临界区**内不可分地完成
+    /// —— ① 经 `write`（在写事务内执行调用方给定的 `base::write` per-entity 写，自带乐观锁
+    /// `expected_version`，返回该实体的**新** version）→ ② 经
+    /// [`base::write::bump_policy_rev`](crate::base::write::bump_policy_rev) 原子递增持久
+    /// `policy_rev` 得 `new_rev` → ③ COMMIT → ④
+    /// [`build_snapshot`](crate::snapshot::build_snapshot)`(db, new_rev)` 物化新快照 →
+    /// ⑤ 若持视图，`SnapshotView::replace(Arc::new(snapshot))` 原子发布。返回
+    /// `(new_version, new_rev)`。
+    ///
+    /// **原子（全或无）**：①②同事务——`write` 返 [`StoreError::VersionConflict`]（乐观锁
+    /// 版本冲突，供上层映射 `409`）或任何 `Err` ⇒ 整体 ROLLBACK，**既不改库、也不前进 rev、
+    /// 也不换 snapshot**；并发读者经 `SnapshotView` 在本临界区释放前绝不见 torn 态（写未
+    /// 提交、或 rev 与 snapshot 不一致都不可见——③之后④⑤仍在同一持有的锁内）。
+    ///
+    /// `write` 闭包是 store 提供的"执行某个 base::write 写 + 原子重建"能力的注入点：
+    /// daemon 侧 `commit_write(actor, WriteIntent{entity, fields, expected_version})` 把
+    /// entity/fields 解构成具体的 `base::write::{insert,update,logical_delete,...}` 调用塞进
+    /// 此闭包（解构是 daemon 的事），本层只负责"在写事务内跑它 + 原子重建并发布"。
+    pub fn commit_and_rebuild<W>(&self, write: W) -> Result<(i64, u64), StoreError>
+    where
+        W: FnOnce(&rusqlite::Transaction<'_>) -> Result<i64, StoreError>,
+    {
+        self.db.commit_and_rebuild(
+            // 第一相（写事务内，COMMIT 前）：① 执行调用方给定的 per-entity base::write
+            // （自带乐观锁，返回该实体新 version）；任一 Err（含 VersionConflict）⇒ 整体
+            // ROLLBACK 且不进第二相（rev 不进、快照不换——全或无）。② 同事务内
+            // base::write::bump_policy_rev 原子 +1 得 new_rev。两者共 COMMIT/ROLLBACK 边界。
+            |txn| {
+                let new_version = write(txn)?;
+                let new_rev = write::bump_policy_rev(txn)?;
+                Ok((new_version, new_rev))
+            },
+            // 第二相（COMMIT 后，同一持有的写锁内、于刚提交的连接上）：③ 以 new_rev 物化
+            // 新快照（build_snapshot_on 复用本连接，绝不二次取锁）；④ 若持视图，原子 replace
+            // 发布。读者在本临界区释放前绝不见 torn 态（rev 与 snapshot 始终一致）。
+            |conn, (new_version, new_rev)| {
+                let snapshot = build_snapshot_on(conn, new_rev)?;
+                if let Some(view) = &self.view {
+                    view.replace(Arc::new(snapshot));
+                }
+                Ok((new_version, new_rev))
+            },
+        )
     }
 
     // ---------------------------------------------------------------- principals
@@ -124,10 +202,7 @@ impl PolicyRepo {
                 InsertRow {
                     table: "principals",
                     columns: vec!["name", "kind"],
-                    values: vec![
-                        Value::Text(name.to_string()),
-                        Value::Text(kind.to_string()),
-                    ],
+                    values: vec![Value::Text(name.to_string()), Value::Text(kind.to_string())],
                     enable_flag: 1,
                 },
             )
@@ -401,16 +476,27 @@ impl PolicyRepo {
                     WHERE principal_id = ?3 AND delete_flag = 0 ORDER BY id LIMIT ?1 OFFSET ?2";
         let count = "SELECT COUNT(*) FROM bindings \
                      WHERE principal_id = ?1 AND delete_flag = 0";
-        execute_page_filtered(&self.db, list, count, principal_id.as_raw() as i64, page, |r| {
-            Ok(BindingRow {
-                id: SnowflakeId::from_raw(r.get::<_, i64>(0).map_err(|_| StoreError::Io)? as u64),
-                version: r.get(1).map_err(|_| StoreError::Io)?,
-                principal_id: SnowflakeId::from_raw(
-                    r.get::<_, i64>(2).map_err(|_| StoreError::Io)? as u64,
-                ),
-                role_id: SnowflakeId::from_raw(r.get::<_, i64>(3).map_err(|_| StoreError::Io)? as u64),
-            })
-        })
+        execute_page_filtered(
+            &self.db,
+            list,
+            count,
+            principal_id.as_raw() as i64,
+            page,
+            |r| {
+                Ok(BindingRow {
+                    id: SnowflakeId::from_raw(
+                        r.get::<_, i64>(0).map_err(|_| StoreError::Io)? as u64
+                    ),
+                    version: r.get(1).map_err(|_| StoreError::Io)?,
+                    principal_id: SnowflakeId::from_raw(
+                        r.get::<_, i64>(2).map_err(|_| StoreError::Io)? as u64,
+                    ),
+                    role_id: SnowflakeId::from_raw(
+                        r.get::<_, i64>(3).map_err(|_| StoreError::Io)? as u64
+                    ),
+                })
+            },
+        )
     }
 }
 

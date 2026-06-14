@@ -9,7 +9,8 @@
 //! - [`timestamp`]：policy.db 时间列与审计 `ts` 的唯一格式化点；
 //! - [`normalize`]：名称入库归一化（`trim` + 小写）；
 //! - [`scope`]：默认作用域（`delete_flag = 0`）+ 分页执行器；
-//! - [`write`]：唯一写路径（INSERT/UPDATE/逻辑删除/级联/系统协调写）。
+//! - [`meta`]：持久 `policy_meta` 键值表读路径（当前仅 `policy_rev`，写在 [`write`]）；
+//! - [`write`]：唯一写路径（INSERT/UPDATE/逻辑删除/级联/系统协调写/`policy_rev` 自增）。
 //!
 //! 可见性（§5.2 / F-6）：`base` 仓储仅本 crate 内可见——不导出为跨 crate 公开
 //! 接口。`base` 不出现在 store 的对外类型表中，依赖图也禁止除 daemon 之外的 crate
@@ -18,6 +19,7 @@
 
 pub mod db;
 pub mod error;
+pub mod meta;
 pub mod normalize;
 pub mod scope;
 pub mod timestamp;

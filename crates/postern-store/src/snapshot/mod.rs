@@ -18,5 +18,5 @@
 pub mod build;
 pub mod view;
 
-pub use build::build_snapshot;
+pub use build::{build_snapshot, build_snapshot_on};
 pub use view::SnapshotView;

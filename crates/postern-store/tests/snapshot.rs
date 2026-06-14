@@ -78,7 +78,9 @@ fn count_where(db: &Db, table: &str, predicate: &str) -> i64 {
         predicate,
     );
     db.with_read(|conn| {
-        let n: i64 = conn.query_row(&q, [], |r| r.get(0)).map_err(|_| StoreError::Io)?;
+        let n: i64 = conn
+            .query_row(&q, [], |r| r.get(0))
+            .map_err(|_| StoreError::Io)?;
         Ok(n)
     })
     .expect("count query")
@@ -386,7 +388,9 @@ fn cell_at<'a>(
     cap: Capability,
 ) -> Option<&'a postern_core::domain::GrantCell> {
     let p = PrincipalId::new(principal);
-    snap.grants.get(&p)?.get(&(ResourceCode::new(resource), cap))
+    snap.grants
+        .get(&p)?
+        .get(&(ResourceCode::new(resource), cap))
 }
 
 // ============================================================ F-12 授权空间物化
@@ -407,8 +411,16 @@ fn build_materializes_binding_role_capability_into_a_grant_cell() {
     let snap = build_snapshot(&db, 1).expect("snapshot builds from a seeded db");
     let cell = cell_at(&snap, p, "db-main", Capability::Observe)
         .expect("the (db-main, observe) grant cell must be materialized for agent-a");
-    assert_eq!(cell.action, GrantAction::Allow, "role_capabilities.action=allow → GrantAction::Allow");
-    assert_eq!(cell.role, Role::new("observer"), "cell carries provenance role observer");
+    assert_eq!(
+        cell.action,
+        GrantAction::Allow,
+        "role_capabilities.action=allow → GrantAction::Allow"
+    );
+    assert_eq!(
+        cell.role,
+        Role::new("observer"),
+        "cell carries provenance role observer"
+    );
 }
 
 #[test]
@@ -416,7 +428,10 @@ fn build_carries_policy_rev_verbatim() {
     // §8-一F-12 / §3.4：policy_rev 是审计对账锚点，由调用方传入、原样落快照。
     let db = migrated_db();
     let snap = build_snapshot(&db, 77).expect("empty db still builds a snapshot");
-    assert_eq!(snap.policy_rev, 77, "policy_rev is carried verbatim into the snapshot");
+    assert_eq!(
+        snap.policy_rev, 77,
+        "policy_rev is carried verbatim into the snapshot"
+    );
 }
 
 #[test]
@@ -424,7 +439,10 @@ fn build_on_empty_db_grants_nothing() {
     // §8-一F-12 / 公理一：空库 → 空授权空间（缺格即 deny），不是错误、不放行任何格。
     let db = migrated_db();
     let snap = build_snapshot(&db, 1).expect("empty db builds the deny-everything snapshot");
-    assert!(snap.grants.is_empty(), "no bindings → no grants (axiom one: absence is deny)");
+    assert!(
+        snap.grants.is_empty(),
+        "no bindings → no grants (axiom one: absence is deny)"
+    );
 }
 
 #[test]
@@ -442,7 +460,11 @@ fn build_escalate_capability_yields_escalate_action_cell() {
 
     let snap = build_snapshot(&db, 1).expect("builds");
     let cell = cell_at(&snap, p, "db-main", Capability::Manage).expect("manage cell present");
-    assert_eq!(cell.action, GrantAction::Escalate, "escalate action materialized as Escalate");
+    assert_eq!(
+        cell.action,
+        GrantAction::Escalate,
+        "escalate action materialized as Escalate"
+    );
 }
 
 // ============================================================ 加载规则：授予性表
@@ -490,7 +512,11 @@ fn build_excludes_logically_deleted_binding_from_grants() {
     // 经 base 唯一写路径逻辑删除该 binding（delete_flag=1、version 自增）。
     db.with_write_txn(|txn| write::logical_delete(txn, now(), &Actor::System, "bindings", b, 0))
         .expect("logical delete binding");
-    assert_eq!(count_where(&db, "bindings", "delete_flag = 1"), 1, "binding is logically removed");
+    assert_eq!(
+        count_where(&db, "bindings", "delete_flag = 1"),
+        1,
+        "binding is logically removed"
+    );
 
     let snap = build_snapshot(&db, 1).expect("builds");
     assert!(
@@ -561,7 +587,10 @@ fn build_loads_deny_note_for_resource_capability() {
         .deny_notes
         .get(&(ResourceCode::new("db-main"), Capability::Destroy))
         .expect("deny note must be projected for (db-main, destroy)");
-    assert_eq!(note, "destruction barred by operator", "operator note relayed verbatim");
+    assert_eq!(
+        note, "destruction barred by operator",
+        "operator note relayed verbatim"
+    );
 }
 
 #[test]
@@ -584,7 +613,13 @@ fn build_excludes_logically_deleted_deny_note() {
 }
 
 /// 与 [`seed_deny_note`] 同，但返回新行 id（供随后逻辑删除）。
-fn seed_deny_note_row(db: &Db, g: &IdGen, resource: SnowflakeId, capability: &str, note: &str) -> SnowflakeId {
+fn seed_deny_note_row(
+    db: &Db,
+    g: &IdGen,
+    resource: SnowflakeId,
+    capability: &str,
+    note: &str,
+) -> SnowflakeId {
     seed(
         db,
         g,
@@ -1017,16 +1052,12 @@ fn build_excludes_mode_row_pointing_at_an_invisible_resource() {
     let g = idgen();
     let res = seed_resource(&db, &g, "db-gone");
     seed_resource_mode(&db, &g, res, "freeze");
-    db.with_write_txn(|txn| {
-        write::logical_delete(txn, now(), &Actor::System, "resources", res, 0)
-    })
-    .expect("logical delete the resource (parent now invisible)");
+    db.with_write_txn(|txn| write::logical_delete(txn, now(), &Actor::System, "resources", res, 0))
+        .expect("logical delete the resource (parent now invisible)");
 
     let snap = build_snapshot(&db, 1).expect("builds");
     assert!(
-        !snap
-            .modes
-            .contains_key(&Some(ResourceCode::new("db-gone"))),
+        !snap.modes.contains_key(&Some(ResourceCode::new("db-gone"))),
         "a mode row scoped to an invisible (dangling) resource is not projected (fail-closed)"
     );
 }

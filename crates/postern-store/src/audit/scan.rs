@@ -80,7 +80,8 @@ pub(crate) fn scan(
     page: PageQuery,
 ) -> Result<Page<AuditRecord>, AuditError> {
     let page = page.clamp();
-    let offset = (u64::from(page.page_no).saturating_sub(1)).saturating_mul(u64::from(page.page_size));
+    let offset =
+        (u64::from(page.page_no).saturating_sub(1)).saturating_mul(u64::from(page.page_size));
     let window_end = offset.saturating_add(u64::from(page.page_size));
 
     // 倒序日期文件名（较晚日期先）；目录不存在视为空集，不是失败。

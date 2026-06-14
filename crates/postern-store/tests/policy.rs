@@ -115,7 +115,9 @@ fn count_where(repo: &PolicyRepo, table: &str, predicate: &str) -> i64 {
     );
     repo.db()
         .with_read(|conn| {
-            let n: i64 = conn.query_row(&q, [], |r| r.get(0)).map_err(|_| StoreError::Io)?;
+            let n: i64 = conn
+                .query_row(&q, [], |r| r.get(0))
+                .map_err(|_| StoreError::Io)?;
             Ok(n)
         })
         .expect("count query")
@@ -148,7 +150,11 @@ fn create_autofills_version_zero_and_equal_timestamps() {
     let id = repo
         .create_principal(&operator("alice"), "svc-bot", "agent")
         .expect("create");
-    assert_eq!(fetch_i64(&repo, "principals", id, "version"), Some(0), "new row version is 0");
+    assert_eq!(
+        fetch_i64(&repo, "principals", id, "version"),
+        Some(0),
+        "new row version is 0"
+    );
     let created = fetch_text(&repo, "principals", id, "created_at").expect("created_at non-null");
     let updated = fetch_text(&repo, "principals", id, "updated_at").expect("updated_at non-null");
     assert_eq!(created, updated, "created_at == updated_at on insert");
@@ -194,10 +200,16 @@ fn create_by_system_actor_stamps_system_in_audit_fields() {
 fn rename_with_matching_version_increments_version_to_one() {
     // §8-一F-2：持 version=0 改名 → 落库 version == 1（version = version + 1）。
     let repo = repo_at(EPOCH_UNIX_MS);
-    let id = repo.create_principal(&operator("alice"), "old-name", "agent").expect("create");
+    let id = repo
+        .create_principal(&operator("alice"), "old-name", "agent")
+        .expect("create");
     repo.rename_principal(&operator("alice"), id, 0, "new-name")
         .expect("rename with matching version");
-    assert_eq!(fetch_i64(&repo, "principals", id, "version"), Some(1), "version increments to 1");
+    assert_eq!(
+        fetch_i64(&repo, "principals", id, "version"),
+        Some(1),
+        "version increments to 1"
+    );
     assert_eq!(
         fetch_text(&repo, "principals", id, "name").as_deref(),
         Some("new-name"),
@@ -209,8 +221,11 @@ fn rename_with_matching_version_increments_version_to_one() {
 fn rename_updates_updated_by_to_acting_operator() {
     // §8-一F-1/F-2：更新维护 updated_by 为当次操作者（created_by 不动）。
     let repo = repo_at(EPOCH_UNIX_MS);
-    let id = repo.create_principal(&operator("alice"), "n0", "agent").expect("create");
-    repo.rename_principal(&operator("bob"), id, 0, "n1").expect("rename by bob");
+    let id = repo
+        .create_principal(&operator("alice"), "n0", "agent")
+        .expect("create");
+    repo.rename_principal(&operator("bob"), id, 0, "n1")
+        .expect("rename by bob");
     assert_eq!(
         fetch_text(&repo, "principals", id, "updated_by").as_deref(),
         Some("bob"),
@@ -227,9 +242,12 @@ fn rename_updates_updated_by_to_acting_operator() {
 fn rename_with_stale_version_returns_version_conflict() {
     // §8-二L-4：持过期 version 改名 → 乐观锁改写影响 0 行 → VersionConflict（独立变体）。
     let repo = repo_at(EPOCH_UNIX_MS);
-    let id = repo.create_principal(&operator("alice"), "n0", "agent").expect("create");
+    let id = repo
+        .create_principal(&operator("alice"), "n0", "agent")
+        .expect("create");
     // 先成功一次把 version 抬到 1。
-    repo.rename_principal(&operator("alice"), id, 0, "n1").expect("first rename");
+    repo.rename_principal(&operator("alice"), id, 0, "n1")
+        .expect("first rename");
     // 再持已过期的 version=0 → 冲突。
     let err = repo
         .rename_principal(&operator("alice"), id, 0, "n2")
@@ -244,8 +262,11 @@ fn rename_with_stale_version_returns_version_conflict() {
 fn version_conflict_leaves_row_unchanged() {
     // §8-二L-4：冲突时库不变——name 与 version 都保持冲突前的值，无静默重试。
     let repo = repo_at(EPOCH_UNIX_MS);
-    let id = repo.create_principal(&operator("alice"), "n0", "agent").expect("create");
-    repo.rename_principal(&operator("alice"), id, 0, "n1").expect("first rename");
+    let id = repo
+        .create_principal(&operator("alice"), "n0", "agent")
+        .expect("create");
+    repo.rename_principal(&operator("alice"), id, 0, "n1")
+        .expect("first rename");
     let _ = repo
         .rename_principal(&operator("alice"), id, 0, "n2")
         .expect_err("conflict");
@@ -268,8 +289,11 @@ fn delete_principal_sets_delete_flag_without_physical_removal() {
     // §8-一F-3 / §8-二L-1：删一行 → 该行 delete_flag==1、version 自增、行仍物理存在
     // （无物理移除、无 undelete 入口）。
     let repo = repo_at(EPOCH_UNIX_MS);
-    let id = repo.create_principal(&operator("alice"), "doomed", "agent").expect("create");
-    repo.delete_principal(&operator("alice"), id, 0).expect("logical delete");
+    let id = repo
+        .create_principal(&operator("alice"), "doomed", "agent")
+        .expect("create");
+    repo.delete_principal(&operator("alice"), id, 0)
+        .expect("logical delete");
     assert_eq!(
         fetch_i64(&repo, "principals", id, "delete_flag"),
         Some(1),
@@ -292,9 +316,15 @@ fn delete_principal_sets_delete_flag_without_physical_removal() {
 fn deleted_principal_is_absent_from_default_scoped_get() {
     // §8-二L-1 / §8-一F-5：删后按 id 默认作用域取单条 → None（默认查询追加 delete_flag=0）。
     let repo = repo_at(EPOCH_UNIX_MS);
-    let id = repo.create_principal(&operator("alice"), "gone", "agent").expect("create");
-    assert!(repo.get_principal(id).expect("get before delete").is_some(), "visible before delete");
-    repo.delete_principal(&operator("alice"), id, 0).expect("delete");
+    let id = repo
+        .create_principal(&operator("alice"), "gone", "agent")
+        .expect("create");
+    assert!(
+        repo.get_principal(id).expect("get before delete").is_some(),
+        "visible before delete"
+    );
+    repo.delete_principal(&operator("alice"), id, 0)
+        .expect("delete");
     assert!(
         repo.get_principal(id).expect("get after delete").is_none(),
         "deleted row is absent from the default-scoped single-row read"
@@ -305,13 +335,26 @@ fn deleted_principal_is_absent_from_default_scoped_get() {
 fn deleted_principal_is_absent_from_default_scoped_list() {
     // §8-一F-5 / §8-二L-1：删后默认集合查询不含该行（追加 delete_flag=0）；未删行仍在。
     let repo = repo_at(EPOCH_UNIX_MS);
-    let keep = repo.create_principal(&operator("alice"), "keep", "agent").expect("create keep");
-    let drop = repo.create_principal(&operator("alice"), "drop", "agent").expect("create drop");
-    repo.delete_principal(&operator("alice"), drop, 0).expect("delete drop");
-    let page = repo.list_principals(PageQuery { page_no: 1, page_size: 50 }).expect("list");
+    let keep = repo
+        .create_principal(&operator("alice"), "keep", "agent")
+        .expect("create keep");
+    let drop = repo
+        .create_principal(&operator("alice"), "drop", "agent")
+        .expect("create drop");
+    repo.delete_principal(&operator("alice"), drop, 0)
+        .expect("delete drop");
+    let page = repo
+        .list_principals(PageQuery {
+            page_no: 1,
+            page_size: 50,
+        })
+        .expect("list");
     let ids: Vec<SnowflakeId> = page.items.iter().map(|p| p.id).collect();
     assert!(ids.contains(&keep), "undeleted row is listed");
-    assert!(!ids.contains(&drop), "deleted row is excluded by default scope");
+    assert!(
+        !ids.contains(&drop),
+        "deleted row is excluded by default scope"
+    );
 }
 
 // ============================================================ F-5 enable_flag 不进默认过滤
@@ -321,9 +364,16 @@ fn list_principals_returns_disabled_but_undeleted_row() {
     // §8-一F-5：enable_flag 不在默认过滤内——enable_flag=0 的未删行仍被默认集合查询返回。
     // 经 base 系统协调写把一行 enable_flag 翻到 0（principals 非限制性表，允许），其仍未删。
     let repo = repo_at(EPOCH_UNIX_MS);
-    let id = repo.create_principal(&operator("alice"), "paused", "agent").expect("create");
+    let id = repo
+        .create_principal(&operator("alice"), "paused", "agent")
+        .expect("create");
     disable_row(&repo, "principals", id);
-    let page = repo.list_principals(PageQuery { page_no: 1, page_size: 50 }).expect("list");
+    let page = repo
+        .list_principals(PageQuery {
+            page_no: 1,
+            page_size: 50,
+        })
+        .expect("list");
     let ids: Vec<SnowflakeId> = page.items.iter().map(|p| p.id).collect();
     assert!(
         ids.contains(&id),
@@ -359,10 +409,17 @@ fn disable_row(repo: &PolicyRepo, table: &'static str, id: SnowflakeId) {
 fn delete_principal_cascades_to_child_bindings() {
     // §8-一F-4 / §8-二L-3：删 principals#p → 其 bindings 子行 delete_flag==1。
     let repo = repo_at(EPOCH_UNIX_MS);
-    let pid = repo.create_principal(&operator("alice"), "p", "agent").expect("principal");
-    let rid = repo.create_role(&operator("alice"), "observer", None).expect("role");
-    let bid = repo.create_binding(&operator("alice"), pid, rid).expect("binding");
-    repo.delete_principal(&operator("alice"), pid, 0).expect("delete principal");
+    let pid = repo
+        .create_principal(&operator("alice"), "p", "agent")
+        .expect("principal");
+    let rid = repo
+        .create_role(&operator("alice"), "observer", None)
+        .expect("role");
+    let bid = repo
+        .create_binding(&operator("alice"), pid, rid)
+        .expect("binding");
+    repo.delete_principal(&operator("alice"), pid, 0)
+        .expect("delete principal");
     assert_eq!(
         fetch_i64(&repo, "bindings", bid, "delete_flag"),
         Some(1),
@@ -377,13 +434,24 @@ fn delete_principal_cascade_spares_other_principals_bindings() {
     // 是级联 fk 作用域（`WHERE fk = parent AND delete_flag = 0`）的唯一价值所在：
     // 去掉作用域改成无条件匹配（过度级联翻掉全表）即会令本断言转红。
     let repo = repo_at(EPOCH_UNIX_MS);
-    let role = repo.create_role(&operator("alice"), "observer", None).expect("role");
-    let doomed = repo.create_principal(&operator("alice"), "doomed", "agent").expect("doomed");
-    let bystander = repo.create_principal(&operator("alice"), "bystander", "agent").expect("bystander");
-    let doomed_binding = repo.create_binding(&operator("alice"), doomed, role).expect("doomed binding");
-    let sibling_binding = repo.create_binding(&operator("alice"), bystander, role).expect("sibling binding");
+    let role = repo
+        .create_role(&operator("alice"), "observer", None)
+        .expect("role");
+    let doomed = repo
+        .create_principal(&operator("alice"), "doomed", "agent")
+        .expect("doomed");
+    let bystander = repo
+        .create_principal(&operator("alice"), "bystander", "agent")
+        .expect("bystander");
+    let doomed_binding = repo
+        .create_binding(&operator("alice"), doomed, role)
+        .expect("doomed binding");
+    let sibling_binding = repo
+        .create_binding(&operator("alice"), bystander, role)
+        .expect("sibling binding");
 
-    repo.delete_principal(&operator("alice"), doomed, 0).expect("delete doomed");
+    repo.delete_principal(&operator("alice"), doomed, 0)
+        .expect("delete doomed");
 
     assert_eq!(
         fetch_i64(&repo, "bindings", doomed_binding, "delete_flag"),
@@ -407,15 +475,20 @@ fn delete_principal_cascades_credentials_and_temp_grants_only_for_that_principal
     let res = repo
         .create_resource(&operator("alice"), "db-main", "postgres", "tcp")
         .expect("resource");
-    let doomed = repo.create_principal(&operator("alice"), "doomed", "agent").expect("doomed");
-    let bystander = repo.create_principal(&operator("alice"), "bystander", "agent").expect("bystander");
+    let doomed = repo
+        .create_principal(&operator("alice"), "doomed", "agent")
+        .expect("doomed");
+    let bystander = repo
+        .create_principal(&operator("alice"), "bystander", "agent")
+        .expect("bystander");
 
     let doomed_cred = seed_credential(&repo, doomed);
     let sibling_cred = seed_credential(&repo, bystander);
     let doomed_tg = seed_temp_grant(&repo, doomed, res);
     let sibling_tg = seed_temp_grant(&repo, bystander, res);
 
-    repo.delete_principal(&operator("alice"), doomed, 0).expect("delete doomed");
+    repo.delete_principal(&operator("alice"), doomed, 0)
+        .expect("delete doomed");
 
     // credentials 边：本主体凭证被级联，他主体凭证存活。
     assert_eq!(
@@ -445,10 +518,17 @@ fn delete_principal_cascades_credentials_and_temp_grants_only_for_that_principal
 fn cascade_stamps_origin_in_child_updated_by() {
     // §8-一F-4：级联子行 updated_by 标 cascade:principals#<id>（来源可追溯）。
     let repo = repo_at(EPOCH_UNIX_MS);
-    let pid = repo.create_principal(&operator("alice"), "p", "agent").expect("principal");
-    let rid = repo.create_role(&operator("alice"), "observer", None).expect("role");
-    let bid = repo.create_binding(&operator("alice"), pid, rid).expect("binding");
-    repo.delete_principal(&operator("alice"), pid, 0).expect("delete principal");
+    let pid = repo
+        .create_principal(&operator("alice"), "p", "agent")
+        .expect("principal");
+    let rid = repo
+        .create_role(&operator("alice"), "observer", None)
+        .expect("role");
+    let bid = repo
+        .create_binding(&operator("alice"), pid, rid)
+        .expect("binding");
+    repo.delete_principal(&operator("alice"), pid, 0)
+        .expect("delete principal");
     let by = fetch_text(&repo, "bindings", bid, "updated_by").expect("updated_by");
     let expected = format!("cascade:principals#{}", pid.as_raw());
     assert_eq!(by, expected, "cascade origin recorded in child updated_by");
@@ -458,9 +538,15 @@ fn cascade_stamps_origin_in_child_updated_by() {
 fn delete_principal_with_stale_version_rolls_back_cascade() {
     // §8-一F-4 / §8-二L-3：删父持过期 version → 整体 ROLLBACK，父子均保持 delete_flag==0。
     let repo = repo_at(EPOCH_UNIX_MS);
-    let pid = repo.create_principal(&operator("alice"), "p", "agent").expect("principal");
-    let rid = repo.create_role(&operator("alice"), "observer", None).expect("role");
-    let bid = repo.create_binding(&operator("alice"), pid, rid).expect("binding");
+    let pid = repo
+        .create_principal(&operator("alice"), "p", "agent")
+        .expect("principal");
+    let rid = repo
+        .create_role(&operator("alice"), "observer", None)
+        .expect("role");
+    let bid = repo
+        .create_binding(&operator("alice"), pid, rid)
+        .expect("binding");
     // 持过期 version=9（真实为 0）删父 → 乐观锁冲突，事务回滚。
     let err = repo
         .delete_principal(&operator("alice"), pid, 9)
@@ -482,14 +568,21 @@ fn delete_principal_with_stale_version_rolls_back_cascade() {
 fn delete_resource_cascades_to_binding_scope_child() {
     // §8-一F-4 / §8-二L-3：删 resources#x → 其 binding_scope 子行 delete_flag==1（§3.2 图）。
     let repo = repo_at(EPOCH_UNIX_MS);
-    let pid = repo.create_principal(&operator("alice"), "p", "agent").expect("principal");
-    let rid = repo.create_role(&operator("alice"), "observer", None).expect("role");
-    let bid = repo.create_binding(&operator("alice"), pid, rid).expect("binding");
+    let pid = repo
+        .create_principal(&operator("alice"), "p", "agent")
+        .expect("principal");
+    let rid = repo
+        .create_role(&operator("alice"), "observer", None)
+        .expect("role");
+    let bid = repo
+        .create_binding(&operator("alice"), pid, rid)
+        .expect("binding");
     let res = repo
         .create_resource(&operator("alice"), "db-main", "postgres", "tcp")
         .expect("resource");
     let scope_id = insert_binding_scope(&repo, bid, res);
-    repo.delete_resource(&operator("alice"), res, 0).expect("delete resource");
+    repo.delete_resource(&operator("alice"), res, 0)
+        .expect("delete resource");
     assert_eq!(
         fetch_i64(&repo, "binding_scope", scope_id, "delete_flag"),
         Some(1),
@@ -509,9 +602,15 @@ fn delete_resource_cascades_every_child_edge_and_spares_other_resource() {
     // 资源子行→去掉 fk 作用域」变异。binding_scope/grant_conditions/mode_state 的 fk 列
     // 名各不同（resource_id / resource_id / scope_resource_id），逐边显式播种。
     let repo = repo_at(EPOCH_UNIX_MS);
-    let pid = repo.create_principal(&operator("alice"), "p", "agent").expect("principal");
-    let rid = repo.create_role(&operator("alice"), "observer", None).expect("role");
-    let bid = repo.create_binding(&operator("alice"), pid, rid).expect("binding");
+    let pid = repo
+        .create_principal(&operator("alice"), "p", "agent")
+        .expect("principal");
+    let rid = repo
+        .create_role(&operator("alice"), "observer", None)
+        .expect("role");
+    let bid = repo
+        .create_binding(&operator("alice"), pid, rid)
+        .expect("binding");
     let doomed = repo
         .create_resource(&operator("alice"), "db-doomed", "postgres", "tcp")
         .expect("doomed resource");
@@ -523,8 +622,22 @@ fn delete_resource_cascades_every_child_edge_and_spares_other_resource() {
     let edges: Vec<(&'static str, SnowflakeId, SnowflakeId)> = vec![
         (
             "resource_credential_tiers",
-            seed_resource_child(&repo, "resource_credential_tiers", "resource_id", doomed, &["tier"], vec!["t-doomed"]),
-            seed_resource_child(&repo, "resource_credential_tiers", "resource_id", bystander, &["tier"], vec!["t-by"]),
+            seed_resource_child(
+                &repo,
+                "resource_credential_tiers",
+                "resource_id",
+                doomed,
+                &["tier"],
+                vec!["t-doomed"],
+            ),
+            seed_resource_child(
+                &repo,
+                "resource_credential_tiers",
+                "resource_id",
+                bystander,
+                &["tier"],
+                vec!["t-by"],
+            ),
         ),
         (
             "binding_scope",
@@ -533,32 +646,103 @@ fn delete_resource_cascades_every_child_edge_and_spares_other_resource() {
         ),
         (
             "grant_constraints",
-            seed_resource_child(&repo, "grant_constraints", "resource_id", doomed, &["capability", "kind"], vec!["query", "rate"]),
-            seed_resource_child(&repo, "grant_constraints", "resource_id", bystander, &["capability", "kind"], vec!["query", "rate"]),
+            seed_resource_child(
+                &repo,
+                "grant_constraints",
+                "resource_id",
+                doomed,
+                &["capability", "kind"],
+                vec!["query", "rate"],
+            ),
+            seed_resource_child(
+                &repo,
+                "grant_constraints",
+                "resource_id",
+                bystander,
+                &["capability", "kind"],
+                vec!["query", "rate"],
+            ),
         ),
         (
             "grant_conditions",
-            seed_resource_child(&repo, "grant_conditions", "resource_id", doomed, &["predicate"], vec!["d-pred"]),
-            seed_resource_child(&repo, "grant_conditions", "resource_id", bystander, &["predicate"], vec!["b-pred"]),
+            seed_resource_child(
+                &repo,
+                "grant_conditions",
+                "resource_id",
+                doomed,
+                &["predicate"],
+                vec!["d-pred"],
+            ),
+            seed_resource_child(
+                &repo,
+                "grant_conditions",
+                "resource_id",
+                bystander,
+                &["predicate"],
+                vec!["b-pred"],
+            ),
         ),
         (
             "mode_state",
-            seed_resource_child(&repo, "mode_state", "scope_resource_id", doomed, &["mode"], vec!["freeze"]),
-            seed_resource_child(&repo, "mode_state", "scope_resource_id", bystander, &["mode"], vec!["freeze"]),
+            seed_resource_child(
+                &repo,
+                "mode_state",
+                "scope_resource_id",
+                doomed,
+                &["mode"],
+                vec!["freeze"],
+            ),
+            seed_resource_child(
+                &repo,
+                "mode_state",
+                "scope_resource_id",
+                bystander,
+                &["mode"],
+                vec!["freeze"],
+            ),
         ),
         (
             "deny_notes",
-            seed_resource_child(&repo, "deny_notes", "resource_id", doomed, &["capability", "note"], vec!["mutate", "d-note"]),
-            seed_resource_child(&repo, "deny_notes", "resource_id", bystander, &["capability", "note"], vec!["mutate", "b-note"]),
+            seed_resource_child(
+                &repo,
+                "deny_notes",
+                "resource_id",
+                doomed,
+                &["capability", "note"],
+                vec!["mutate", "d-note"],
+            ),
+            seed_resource_child(
+                &repo,
+                "deny_notes",
+                "resource_id",
+                bystander,
+                &["capability", "note"],
+                vec!["mutate", "b-note"],
+            ),
         ),
         (
             "resource_labels",
-            seed_resource_child(&repo, "resource_labels", "resource_id", doomed, &["key", "value"], vec!["env", "prod"]),
-            seed_resource_child(&repo, "resource_labels", "resource_id", bystander, &["key", "value"], vec!["env", "prod"]),
+            seed_resource_child(
+                &repo,
+                "resource_labels",
+                "resource_id",
+                doomed,
+                &["key", "value"],
+                vec!["env", "prod"],
+            ),
+            seed_resource_child(
+                &repo,
+                "resource_labels",
+                "resource_id",
+                bystander,
+                &["key", "value"],
+                vec!["env", "prod"],
+            ),
         ),
     ];
 
-    repo.delete_resource(&operator("alice"), doomed, 0).expect("delete doomed resource");
+    repo.delete_resource(&operator("alice"), doomed, 0)
+        .expect("delete doomed resource");
 
     for (table, doomed_child, sibling_child) in edges {
         assert_eq!(
@@ -595,7 +779,11 @@ fn seed_resource_child(
 }
 
 /// 经 base 唯一写路径插一行 binding_scope（kind=resource，挂在某 binding+resource 上）。
-fn insert_binding_scope(repo: &PolicyRepo, binding_id: SnowflakeId, resource_id: SnowflakeId) -> SnowflakeId {
+fn insert_binding_scope(
+    repo: &PolicyRepo,
+    binding_id: SnowflakeId,
+    resource_id: SnowflakeId,
+) -> SnowflakeId {
     use rusqlite::types::Value;
     seed_child(
         repo,
@@ -676,7 +864,13 @@ fn seed_temp_grant(
     seed_child(
         repo,
         "temp_grants",
-        &["principal_id", "resource_id", "capability", "granted_at", "expires_at"],
+        &[
+            "principal_id",
+            "resource_id",
+            "capability",
+            "granted_at",
+            "expires_at",
+        ],
         vec![
             Value::Integer(principal_id.as_raw() as i64),
             Value::Integer(resource_id.as_raw() as i64),
@@ -696,7 +890,10 @@ fn create_role_named_admin_is_rejected_by_check() {
     let err = repo
         .create_role(&operator("alice"), "admin", None)
         .expect_err("admin role name must be rejected");
-    assert!(matches!(err, StoreError::ConstraintViolation), "got {err:?}");
+    assert!(
+        matches!(err, StoreError::ConstraintViolation),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -719,18 +916,24 @@ fn create_role_named_admin_with_padding_and_caps_is_rejected() {
 fn duplicate_principal_name_after_normalization_is_rejected() {
     // §8-一F-10：先后写归一化后相同的两条名 → 第二条被 partial unique 拒。
     let repo = repo_at(EPOCH_UNIX_MS);
-    repo.create_principal(&operator("alice"), "Bot", "agent").expect("first lands");
+    repo.create_principal(&operator("alice"), "Bot", "agent")
+        .expect("first lands");
     let err = repo
         .create_principal(&operator("alice"), "  bot ", "agent")
         .expect_err("normalized-duplicate must be rejected by partial unique");
-    assert!(matches!(err, StoreError::ConstraintViolation), "got {err:?}");
+    assert!(
+        matches!(err, StoreError::ConstraintViolation),
+        "got {err:?}"
+    );
 }
 
 #[test]
 fn principal_name_is_normalized_on_store() {
     // §8-一F-10：name 入库前归一化（trim + 小写），落库为归一化值。
     let repo = repo_at(EPOCH_UNIX_MS);
-    let id = repo.create_principal(&operator("alice"), "  MixedCase  ", "agent").expect("create");
+    let id = repo
+        .create_principal(&operator("alice"), "  MixedCase  ", "agent")
+        .expect("create");
     assert_eq!(
         fetch_text(&repo, "principals", id, "name").as_deref(),
         Some("mixedcase"),
@@ -742,12 +945,19 @@ fn principal_name_is_normalized_on_store() {
 fn deleted_name_can_be_recreated_partial_unique_allows() {
     // §8-一F-11（partial unique on delete_flag=0）：逻辑删后同名可重建。
     let repo = repo_at(EPOCH_UNIX_MS);
-    let first = repo.create_principal(&operator("alice"), "reborn", "agent").expect("first");
-    repo.delete_principal(&operator("alice"), first, 0).expect("delete first");
+    let first = repo
+        .create_principal(&operator("alice"), "reborn", "agent")
+        .expect("first");
+    repo.delete_principal(&operator("alice"), first, 0)
+        .expect("delete first");
     let second = repo
         .create_principal(&operator("alice"), "reborn", "agent")
         .expect("same name re-creates after logical delete (partial unique on delete_flag=0)");
-    assert_ne!(first.as_raw(), second.as_raw(), "a brand new row id, not an undelete");
+    assert_ne!(
+        first.as_raw(),
+        second.as_raw(),
+        "a brand new row id, not an undelete"
+    );
 }
 
 // ============================================================ F-7 后端分页 clamp
@@ -756,11 +966,19 @@ fn deleted_name_can_be_recreated_partial_unique_allows() {
 fn list_principals_clamps_oversized_page_size_to_max() {
     // §8-一F-7：传 page_size=201 → 返回信封 page_size==200（clamp(201)==200）。
     let repo = repo_at(EPOCH_UNIX_MS);
-    repo.create_principal(&operator("alice"), "p0", "agent").expect("seed");
+    repo.create_principal(&operator("alice"), "p0", "agent")
+        .expect("seed");
     let page = repo
-        .list_principals(PageQuery { page_no: 1, page_size: 201 })
+        .list_principals(PageQuery {
+            page_no: 1,
+            page_size: 201,
+        })
         .expect("list");
-    assert_eq!(page.page_size, PageQuery::MAX_SIZE, "page_size clamped to MAX_SIZE");
+    assert_eq!(
+        page.page_size,
+        PageQuery::MAX_SIZE,
+        "page_size clamped to MAX_SIZE"
+    );
 }
 
 #[test]
@@ -772,10 +990,19 @@ fn list_principals_caps_items_to_page_size() {
             .expect("seed");
     }
     let page: Page<PrincipalRow> = repo
-        .list_principals(PageQuery { page_no: 1, page_size: 2 })
+        .list_principals(PageQuery {
+            page_no: 1,
+            page_size: 2,
+        })
         .expect("list");
-    assert!(page.items.len() <= 2, "items are LIMIT-bounded to page_size");
-    assert_eq!(page.total, 5, "total reflects all undeleted rows regardless of page size");
+    assert!(
+        page.items.len() <= 2,
+        "items are LIMIT-bounded to page_size"
+    );
+    assert_eq!(
+        page.total, 5,
+        "total reflects all undeleted rows regardless of page size"
+    );
 }
 
 #[test]
@@ -784,15 +1011,32 @@ fn list_principals_second_page_offsets_correctly() {
     let repo = repo_at(EPOCH_UNIX_MS);
     let mut all = Vec::new();
     for i in 0..3 {
-        all.push(repo.create_principal(&operator("alice"), &format!("p{i}"), "agent").expect("seed"));
+        all.push(
+            repo.create_principal(&operator("alice"), &format!("p{i}"), "agent")
+                .expect("seed"),
+        );
     }
-    let p1 = repo.list_principals(PageQuery { page_no: 1, page_size: 2 }).expect("page1");
-    let p2 = repo.list_principals(PageQuery { page_no: 2, page_size: 2 }).expect("page2");
+    let p1 = repo
+        .list_principals(PageQuery {
+            page_no: 1,
+            page_size: 2,
+        })
+        .expect("page1");
+    let p2 = repo
+        .list_principals(PageQuery {
+            page_no: 2,
+            page_size: 2,
+        })
+        .expect("page2");
     let mut seen: Vec<SnowflakeId> = p1.items.iter().map(|r| r.id).collect();
     seen.extend(p2.items.iter().map(|r| r.id));
     seen.sort_by_key(|s| s.as_raw());
     seen.dedup();
-    assert_eq!(seen.len(), 3, "page 1 + page 2 cover all three rows without overlap");
+    assert_eq!(
+        seen.len(),
+        3,
+        "page 1 + page 2 cover all three rows without overlap"
+    );
 }
 
 // ============================================================ 读端点携 version
@@ -801,13 +1045,22 @@ fn list_principals_second_page_offsets_correctly() {
 fn get_principal_returns_current_version_for_optimistic_lock() {
     // §8-一F-2 / §6.4：读端点统一返回 version，供调用方下一次写带上做乐观锁。
     let repo = repo_at(EPOCH_UNIX_MS);
-    let id = repo.create_principal(&operator("alice"), "p", "agent").expect("create");
+    let id = repo
+        .create_principal(&operator("alice"), "p", "agent")
+        .expect("create");
     let row = repo.get_principal(id).expect("get").expect("present");
     assert_eq!(row.version, 0, "fresh row reports version 0");
-    repo.rename_principal(&operator("alice"), id, row.version, "p2").expect("rename with read version");
+    repo.rename_principal(&operator("alice"), id, row.version, "p2")
+        .expect("rename with read version");
     let row2 = repo.get_principal(id).expect("get2").expect("present");
-    assert_eq!(row2.version, 1, "read-back version advanced after the write");
-    assert_eq!(row2.name, "p2", "read model reflects the new business value");
+    assert_eq!(
+        row2.version, 1,
+        "read-back version advanced after the write"
+    );
+    assert_eq!(
+        row2.name, "p2",
+        "read model reflects the new business value"
+    );
 }
 
 // ============================================================ 角色 / 资源读模型
@@ -816,13 +1069,29 @@ fn get_principal_returns_current_version_for_optimistic_lock() {
 fn list_roles_excludes_deleted_and_carries_version() {
     // §8-一F-5 / F-2：角色集合默认排除已删、读模型携 version。
     let repo = repo_at(EPOCH_UNIX_MS);
-    let keep = repo.create_role(&operator("alice"), "observer", Some("read-only")).expect("keep");
-    let drop = repo.create_role(&operator("alice"), "tmp", None).expect("drop");
-    repo.delete_role(&operator("alice"), drop, 0).expect("delete role");
-    let page = repo.list_roles(PageQuery { page_no: 1, page_size: 50 }).expect("list roles");
+    let keep = repo
+        .create_role(&operator("alice"), "observer", Some("read-only"))
+        .expect("keep");
+    let drop = repo
+        .create_role(&operator("alice"), "tmp", None)
+        .expect("drop");
+    repo.delete_role(&operator("alice"), drop, 0)
+        .expect("delete role");
+    let page = repo
+        .list_roles(PageQuery {
+            page_no: 1,
+            page_size: 50,
+        })
+        .expect("list roles");
     let rows: Vec<&RoleRow> = page.items.iter().collect();
-    assert!(rows.iter().any(|r| r.id == keep && r.version == 0), "kept role present with version 0");
-    assert!(!rows.iter().any(|r| r.id == drop), "deleted role excluded by default scope");
+    assert!(
+        rows.iter().any(|r| r.id == keep && r.version == 0),
+        "kept role present with version 0"
+    );
+    assert!(
+        !rows.iter().any(|r| r.id == drop),
+        "deleted role excluded by default scope"
+    );
 }
 
 #[test]
@@ -833,12 +1102,22 @@ fn delete_role_cascades_every_child_edge_and_spares_other_role() {
     // 【被删角色 doomed】下与一行挂在【另一角色 bystander】下，断言前者 delete_flag→1、
     // 后者→0（fk 作用域）。
     let repo = repo_at(EPOCH_UNIX_MS);
-    let doomed = repo.create_role(&operator("alice"), "doomed", None).expect("doomed role");
-    let bystander = repo.create_role(&operator("alice"), "bystander", None).expect("bystander role");
+    let doomed = repo
+        .create_role(&operator("alice"), "doomed", None)
+        .expect("doomed role");
+    let bystander = repo
+        .create_role(&operator("alice"), "bystander", None)
+        .expect("bystander role");
     // role_inherits 的 parent 角色（外键须指向真实 roles 行）。
-    let parent = repo.create_role(&operator("alice"), "parent", None).expect("parent role");
-    let p1 = repo.create_principal(&operator("alice"), "p1", "agent").expect("p1");
-    let p2 = repo.create_principal(&operator("alice"), "p2", "agent").expect("p2");
+    let parent = repo
+        .create_role(&operator("alice"), "parent", None)
+        .expect("parent role");
+    let p1 = repo
+        .create_principal(&operator("alice"), "p1", "agent")
+        .expect("p1");
+    let p2 = repo
+        .create_principal(&operator("alice"), "p2", "agent")
+        .expect("p2");
 
     // role_inherits 边（fk = role_id）。
     let doomed_inherit = seed_child(
@@ -881,10 +1160,15 @@ fn delete_role_cascades_every_child_edge_and_spares_other_role() {
         ],
     );
     // bindings 边（fk = role_id）：两条不同主体绑到两个角色，避免 (principal, role) 重复。
-    let doomed_binding = repo.create_binding(&operator("alice"), p1, doomed).expect("doomed binding");
-    let sibling_binding = repo.create_binding(&operator("alice"), p2, bystander).expect("sibling binding");
+    let doomed_binding = repo
+        .create_binding(&operator("alice"), p1, doomed)
+        .expect("doomed binding");
+    let sibling_binding = repo
+        .create_binding(&operator("alice"), p2, bystander)
+        .expect("sibling binding");
 
-    repo.delete_role(&operator("alice"), doomed, 0).expect("delete doomed role");
+    repo.delete_role(&operator("alice"), doomed, 0)
+        .expect("delete doomed role");
 
     for (table, doomed_child, sibling_child) in [
         ("role_inherits", doomed_inherit, sibling_inherit),
@@ -911,7 +1195,12 @@ fn list_resources_reflects_persisted_business_columns() {
     let id = repo
         .create_resource(&operator("alice"), "db-main", "postgres", "tcp")
         .expect("resource");
-    let page = repo.list_resources(PageQuery { page_no: 1, page_size: 50 }).expect("list");
+    let page = repo
+        .list_resources(PageQuery {
+            page_no: 1,
+            page_size: 50,
+        })
+        .expect("list");
     let row: &ResourceRow = page
         .items
         .iter()
@@ -926,12 +1215,26 @@ fn list_resources_reflects_persisted_business_columns() {
 fn list_bindings_of_filters_by_principal_and_excludes_deleted() {
     // §8-一F-5：列某主体的绑定——只含该主体且默认排除已删。
     let repo = repo_at(EPOCH_UNIX_MS);
-    let p1 = repo.create_principal(&operator("alice"), "p1", "agent").expect("p1");
-    let p2 = repo.create_principal(&operator("alice"), "p2", "agent").expect("p2");
-    let r = repo.create_role(&operator("alice"), "observer", None).expect("role");
+    let p1 = repo
+        .create_principal(&operator("alice"), "p1", "agent")
+        .expect("p1");
+    let p2 = repo
+        .create_principal(&operator("alice"), "p2", "agent")
+        .expect("p2");
+    let r = repo
+        .create_role(&operator("alice"), "observer", None)
+        .expect("role");
     let b1 = repo.create_binding(&operator("alice"), p1, r).expect("b1");
     let _b2 = repo.create_binding(&operator("alice"), p2, r).expect("b2");
-    let page = repo.list_bindings_of(p1, PageQuery { page_no: 1, page_size: 50 }).expect("list");
+    let page = repo
+        .list_bindings_of(
+            p1,
+            PageQuery {
+                page_no: 1,
+                page_size: 50,
+            },
+        )
+        .expect("list");
     let rows: Vec<&BindingRow> = page.items.iter().collect();
     assert_eq!(rows.len(), 1, "only p1's binding is listed");
     assert_eq!(rows[0].id, b1, "the listed binding belongs to p1");
@@ -942,11 +1245,19 @@ fn list_bindings_of_filters_by_principal_and_excludes_deleted() {
 fn duplicate_binding_is_rejected_by_partial_unique() {
     // §8-一F-11：同 (principal, role) 重复绑定（delete_flag=0）→ partial unique 拒。
     let repo = repo_at(EPOCH_UNIX_MS);
-    let p = repo.create_principal(&operator("alice"), "p", "agent").expect("p");
-    let r = repo.create_role(&operator("alice"), "observer", None).expect("role");
-    repo.create_binding(&operator("alice"), p, r).expect("first binding");
+    let p = repo
+        .create_principal(&operator("alice"), "p", "agent")
+        .expect("p");
+    let r = repo
+        .create_role(&operator("alice"), "observer", None)
+        .expect("role");
+    repo.create_binding(&operator("alice"), p, r)
+        .expect("first binding");
     let err = repo
         .create_binding(&operator("alice"), p, r)
         .expect_err("duplicate (principal, role) binding must be rejected");
-    assert!(matches!(err, StoreError::ConstraintViolation), "got {err:?}");
+    assert!(
+        matches!(err, StoreError::ConstraintViolation),
+        "got {err:?}"
+    );
 }

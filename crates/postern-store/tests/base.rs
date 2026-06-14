@@ -22,9 +22,7 @@ use postern_store::base::error::StoreError;
 use postern_store::base::normalize::normalize_name;
 use postern_store::base::scope::{self, DEFAULT_SCOPE_PREDICATE};
 use postern_store::base::timestamp::{self, TIMESTAMP_LEN};
-use postern_store::base::write::{
-    self, Actor, InsertRow, RESTRICTED_TABLES, SYSTEM_ACTOR,
-};
+use postern_store::base::write::{self, Actor, InsertRow, RESTRICTED_TABLES, SYSTEM_ACTOR};
 use rusqlite::types::Value;
 
 // ============================================================ 运行期 SQL 片段拼接
@@ -87,8 +85,7 @@ fn create_fixture(db: &Db) {
     ];
     db.with_write_txn(|txn| {
         for s in &stmts {
-            txn.execute_batch(s)
-                .map_err(|_| StoreError::Io)?;
+            txn.execute_batch(s).map_err(|_| StoreError::Io)?;
         }
         Ok(())
     })
@@ -200,12 +197,33 @@ fn insert_autofills_all_five_audit_fields_non_null() {
     // §8-一F-1：经 base 写一行、调用方不传五字段 → 落库五字段非空。
     let db = fresh_db();
     let idgen = idgen_at(1_767_225_600_500);
-    let id = insert_resource(&db, &idgen, Timestamp::from_unix_ms(1_767_225_600_500), &Actor::System, "pg-main");
-    assert!(fetch_i64(&db, "resources", id, "version").is_some(), "version filled");
-    assert!(fetch_text(&db, "resources", id, "created_at").is_some(), "created_at filled");
-    assert!(fetch_text(&db, "resources", id, "created_by").is_some(), "created_by filled");
-    assert!(fetch_text(&db, "resources", id, "updated_at").is_some(), "updated_at filled");
-    assert!(fetch_text(&db, "resources", id, "updated_by").is_some(), "updated_by filled");
+    let id = insert_resource(
+        &db,
+        &idgen,
+        Timestamp::from_unix_ms(1_767_225_600_500),
+        &Actor::System,
+        "pg-main",
+    );
+    assert!(
+        fetch_i64(&db, "resources", id, "version").is_some(),
+        "version filled"
+    );
+    assert!(
+        fetch_text(&db, "resources", id, "created_at").is_some(),
+        "created_at filled"
+    );
+    assert!(
+        fetch_text(&db, "resources", id, "created_by").is_some(),
+        "created_by filled"
+    );
+    assert!(
+        fetch_text(&db, "resources", id, "updated_at").is_some(),
+        "updated_at filled"
+    );
+    assert!(
+        fetch_text(&db, "resources", id, "updated_by").is_some(),
+        "updated_by filled"
+    );
 }
 
 #[test]
@@ -213,7 +231,13 @@ fn insert_sets_version_zero() {
     // §8-一F-1：新插行 version == 0。
     let db = fresh_db();
     let idgen = idgen_at(1_767_225_600_500);
-    let id = insert_resource(&db, &idgen, Timestamp::from_unix_ms(1_767_225_600_500), &Actor::System, "r1");
+    let id = insert_resource(
+        &db,
+        &idgen,
+        Timestamp::from_unix_ms(1_767_225_600_500),
+        &Actor::System,
+        "r1",
+    );
     assert_eq!(fetch_i64(&db, "resources", id, "version"), Some(0));
 }
 
@@ -222,7 +246,13 @@ fn insert_sets_created_at_equal_updated_at() {
     // §8-一F-1：created_at == updated_at（同一 now 双写）。
     let db = fresh_db();
     let idgen = idgen_at(1_767_225_600_500);
-    let id = insert_resource(&db, &idgen, Timestamp::from_unix_ms(1_767_225_600_500), &Actor::System, "r2");
+    let id = insert_resource(
+        &db,
+        &idgen,
+        Timestamp::from_unix_ms(1_767_225_600_500),
+        &Actor::System,
+        "r2",
+    );
     let created = fetch_text(&db, "resources", id, "created_at");
     let updated = fetch_text(&db, "resources", id, "updated_at");
     assert_eq!(created, updated);
@@ -234,7 +264,13 @@ fn insert_timestamp_columns_are_width_24() {
     // §8-一F-1：落库时间戳长度 24。
     let db = fresh_db();
     let idgen = idgen_at(1_767_225_600_500);
-    let id = insert_resource(&db, &idgen, Timestamp::from_unix_ms(1_767_225_600_500), &Actor::System, "r3");
+    let id = insert_resource(
+        &db,
+        &idgen,
+        Timestamp::from_unix_ms(1_767_225_600_500),
+        &Actor::System,
+        "r3",
+    );
     let created = fetch_text(&db, "resources", id, "created_at").expect("created_at");
     assert_eq!(created.len(), 24, "created_at width fixed at 24");
 }
@@ -244,7 +280,13 @@ fn insert_new_row_has_delete_flag_zero() {
     // §8-一F-1：新插行 delete_flag == 0。
     let db = fresh_db();
     let idgen = idgen_at(1_767_225_600_500);
-    let id = insert_resource(&db, &idgen, Timestamp::from_unix_ms(1_767_225_600_500), &Actor::System, "r4");
+    let id = insert_resource(
+        &db,
+        &idgen,
+        Timestamp::from_unix_ms(1_767_225_600_500),
+        &Actor::System,
+        "r4",
+    );
     assert_eq!(fetch_i64(&db, "resources", id, "delete_flag"), Some(0));
 }
 
@@ -254,9 +296,21 @@ fn control_plane_insert_records_operator_as_created_by() {
     let db = fresh_db();
     let idgen = idgen_at(1_767_225_600_500);
     let actor = Actor::Operator("alice".to_string());
-    let id = insert_resource(&db, &idgen, Timestamp::from_unix_ms(1_767_225_600_500), &actor, "r5");
-    assert_eq!(fetch_text(&db, "resources", id, "created_by"), Some("alice".to_string()));
-    assert_eq!(fetch_text(&db, "resources", id, "updated_by"), Some("alice".to_string()));
+    let id = insert_resource(
+        &db,
+        &idgen,
+        Timestamp::from_unix_ms(1_767_225_600_500),
+        &actor,
+        "r5",
+    );
+    assert_eq!(
+        fetch_text(&db, "resources", id, "created_by"),
+        Some("alice".to_string())
+    );
+    assert_eq!(
+        fetch_text(&db, "resources", id, "updated_by"),
+        Some("alice".to_string())
+    );
 }
 
 #[test]
@@ -264,9 +318,21 @@ fn system_insert_records_system_as_created_and_updated_by() {
     // §8-一F-1：系统写 created_by == updated_by == 'system'。
     let db = fresh_db();
     let idgen = idgen_at(1_767_225_600_500);
-    let id = insert_resource(&db, &idgen, Timestamp::from_unix_ms(1_767_225_600_500), &Actor::System, "r6");
-    assert_eq!(fetch_text(&db, "resources", id, "created_by"), Some("system".to_string()));
-    assert_eq!(fetch_text(&db, "resources", id, "updated_by"), Some("system".to_string()));
+    let id = insert_resource(
+        &db,
+        &idgen,
+        Timestamp::from_unix_ms(1_767_225_600_500),
+        &Actor::System,
+        "r6",
+    );
+    assert_eq!(
+        fetch_text(&db, "resources", id, "created_by"),
+        Some("system".to_string())
+    );
+    assert_eq!(
+        fetch_text(&db, "resources", id, "updated_by"),
+        Some("system".to_string())
+    );
     // SYSTEM_ACTOR 字面与 'system' 落库值一致（审计字段自动化的常量来源）。
     assert_eq!(SYSTEM_ACTOR, "system");
 }
@@ -303,7 +369,10 @@ fn update_with_matching_version_increments_version_by_one() {
     })
     .expect("update with matching version succeeds");
     assert_eq!(fetch_i64(&db, "resources", id, "version"), Some(1));
-    assert_eq!(fetch_text(&db, "resources", id, "codename"), Some("pg-renamed".to_string()));
+    assert_eq!(
+        fetch_text(&db, "resources", id, "codename"),
+        Some("pg-renamed".to_string())
+    );
 }
 
 #[test]
@@ -312,7 +381,13 @@ fn update_maintains_updated_by_to_actor() {
     let db = fresh_db();
     let idgen = idgen_at(1_767_225_600_500);
     let now = Timestamp::from_unix_ms(1_767_225_600_500);
-    let id = insert_resource(&db, &idgen, now, &Actor::Operator("creator".to_string()), "r-ub");
+    let id = insert_resource(
+        &db,
+        &idgen,
+        now,
+        &Actor::Operator("creator".to_string()),
+        "r-ub",
+    );
     db.with_write_txn(|txn| {
         write::update(
             txn,
@@ -327,8 +402,14 @@ fn update_maintains_updated_by_to_actor() {
         )
     })
     .expect("update");
-    assert_eq!(fetch_text(&db, "resources", id, "created_by"), Some("creator".to_string()));
-    assert_eq!(fetch_text(&db, "resources", id, "updated_by"), Some("editor".to_string()));
+    assert_eq!(
+        fetch_text(&db, "resources", id, "created_by"),
+        Some("creator".to_string())
+    );
+    assert_eq!(
+        fetch_text(&db, "resources", id, "updated_by"),
+        Some("editor".to_string())
+    );
 }
 
 // ============================================================ L-4 乐观锁冲突
@@ -371,10 +452,16 @@ fn update_with_stale_version_returns_version_conflict_and_leaves_row_unchanged()
             )
         })
         .expect_err("stale version must conflict");
-    assert!(matches!(err, StoreError::VersionConflict), "exactly VersionConflict, got {err:?}");
+    assert!(
+        matches!(err, StoreError::VersionConflict),
+        "exactly VersionConflict, got {err:?}"
+    );
     // 库不变：version 仍 1、codename 仍 first。
     assert_eq!(fetch_i64(&db, "resources", id, "version"), Some(1));
-    assert_eq!(fetch_text(&db, "resources", id, "codename"), Some("first".to_string()));
+    assert_eq!(
+        fetch_text(&db, "resources", id, "codename"),
+        Some("first".to_string())
+    );
 }
 
 #[test]
@@ -396,7 +483,10 @@ fn update_nonexistent_row_with_any_version_is_version_conflict_not_io() {
             )
         })
         .expect_err("absent row update must conflict");
-    assert!(matches!(err, StoreError::VersionConflict), "0-rows maps to VersionConflict, got {err:?}");
+    assert!(
+        matches!(err, StoreError::VersionConflict),
+        "0-rows maps to VersionConflict, got {err:?}"
+    );
 }
 
 // ============================================================ F-3 仅逻辑删除
@@ -421,9 +511,15 @@ fn logical_delete_sets_delete_flag_one_and_increments_version() {
     .expect("logical delete");
     assert_eq!(fetch_i64(&db, "resources", id, "delete_flag"), Some(1));
     assert_eq!(fetch_i64(&db, "resources", id, "version"), Some(1));
-    assert_eq!(fetch_text(&db, "resources", id, "updated_by"), Some("remover".to_string()));
+    assert_eq!(
+        fetch_text(&db, "resources", id, "updated_by"),
+        Some("remover".to_string())
+    );
     // 物理行仍在（仅逻辑删除，非物理删除）。
-    assert!(row_exists(&db, "resources", id), "row physically remains after logical delete");
+    assert!(
+        row_exists(&db, "resources", id),
+        "row physically remains after logical delete"
+    );
 }
 
 #[test]
@@ -523,7 +619,11 @@ fn cascade_logical_delete_marks_direct_children_deleted_with_cascade_origin() {
     .expect("cascade delete");
     let expect_origin = format!("cascade:principals#{pid}");
     for (table, cid) in &child_ids {
-        assert_eq!(fetch_i64(&db, table, *cid, "delete_flag"), Some(1), "{table} child deleted");
+        assert_eq!(
+            fetch_i64(&db, table, *cid, "delete_flag"),
+            Some(1),
+            "{table} child deleted"
+        );
         assert_eq!(
             fetch_text(&db, table, *cid, "updated_by"),
             Some(expect_origin.clone()),
@@ -594,8 +694,16 @@ fn cascade_rollback_leaves_parent_and_children_undeleted() {
     });
     assert!(res.is_err(), "transaction returns Err to force rollback");
     // ROLLBACK：父子都仍未删。
-    assert_eq!(fetch_i64(&db, "principals", pid, "delete_flag"), Some(0), "parent rolled back");
-    assert_eq!(fetch_i64(&db, "credentials", cid, "delete_flag"), Some(0), "child rolled back");
+    assert_eq!(
+        fetch_i64(&db, "principals", pid, "delete_flag"),
+        Some(0),
+        "parent rolled back"
+    );
+    assert_eq!(
+        fetch_i64(&db, "credentials", cid, "delete_flag"),
+        Some(0),
+        "child rolled back"
+    );
 }
 
 // ============================================================ F-5 / L-1 默认作用域
@@ -634,7 +742,10 @@ fn default_scope_query_excludes_logically_deleted_row() {
     let _ = list_sql; // 形态确认；实际查询走 collect_ids 助手
     let ids = collect_live_resource_ids(&db);
     assert!(ids.contains(&keep), "live row present");
-    assert!(!ids.contains(&gone), "deleted row absent from default scope");
+    assert!(
+        !ids.contains(&gone),
+        "deleted row absent from default scope"
+    );
 }
 
 #[test]
@@ -661,10 +772,19 @@ fn default_scope_keeps_disabled_but_undeleted_rows_visible() {
             Ok(id.as_raw() as i64)
         })
         .expect("insert disabled principal");
-    assert_eq!(fetch_i64(&db, "principals", disabled, "enable_flag"), Some(0));
-    assert_eq!(fetch_i64(&db, "principals", disabled, "delete_flag"), Some(0));
+    assert_eq!(
+        fetch_i64(&db, "principals", disabled, "enable_flag"),
+        Some(0)
+    );
+    assert_eq!(
+        fetch_i64(&db, "principals", disabled, "delete_flag"),
+        Some(0)
+    );
     let ids = collect_live_principal_ids(&db);
-    assert!(ids.contains(&disabled), "disabled but undeleted row still in default scope");
+    assert!(
+        ids.contains(&disabled),
+        "disabled but undeleted row still in default scope"
+    );
 }
 
 #[test]
@@ -696,7 +816,10 @@ fn collect_live_resource_ids(db: &Db) -> Vec<i64> {
         db,
         &list_sql,
         &count_sql,
-        PageQuery { page_no: 1, page_size: 50 },
+        PageQuery {
+            page_no: 1,
+            page_size: 50,
+        },
         |row| row.get::<_, i64>(0).map_err(|_| StoreError::Io),
     )
     .expect("page query");
@@ -724,7 +847,10 @@ fn collect_live_principal_ids(db: &Db) -> Vec<i64> {
         db,
         &list_sql,
         &count_sql,
-        PageQuery { page_no: 1, page_size: 50 },
+        PageQuery {
+            page_no: 1,
+            page_size: 50,
+        },
         |row| row.get::<_, i64>(0).map_err(|_| StoreError::Io),
     )
     .expect("page query");
@@ -763,7 +889,10 @@ fn page_size_over_max_is_clamped_to_two_hundred_in_limit() {
         &db,
         &list_sql,
         &count_sql,
-        PageQuery { page_no: 1, page_size: 201 },
+        PageQuery {
+            page_no: 1,
+            page_size: 201,
+        },
         |row| row.get::<_, i64>(0).map_err(|_| StoreError::Io),
     )
     .expect("clamped page");
@@ -801,7 +930,10 @@ fn page_envelope_reports_total_and_requested_page_no() {
         &db,
         &list_sql,
         &count_sql,
-        PageQuery { page_no: 1, page_size: 2 },
+        PageQuery {
+            page_no: 1,
+            page_size: 2,
+        },
         |row| row.get::<_, i64>(0).map_err(|_| StoreError::Io),
     )
     .expect("page");
@@ -837,8 +969,15 @@ fn restricted_table_insert_with_enable_flag_zero_is_rejected_and_db_unchanged() 
             .map(|_| ())
         })
         .expect_err("enable_flag=0 on restricted table must be rejected");
-    assert!(matches!(err, StoreError::ConstraintViolation), "exactly ConstraintViolation, got {err:?}");
-    assert_eq!(count_rows(&db, "mode_state"), before, "restricted-table row count unchanged");
+    assert!(
+        matches!(err, StoreError::ConstraintViolation),
+        "exactly ConstraintViolation, got {err:?}"
+    );
+    assert_eq!(
+        count_rows(&db, "mode_state"),
+        before,
+        "restricted-table row count unchanged"
+    );
 }
 
 #[test]
@@ -905,8 +1044,15 @@ fn restricted_table_update_to_enable_flag_zero_is_rejected() {
             )
         })
         .expect_err("flipping restricted enable_flag to 0 must be rejected");
-    assert!(matches!(err, StoreError::ConstraintViolation), "got {err:?}");
-    assert_eq!(fetch_i64(&db, "mode_state", id, "enable_flag"), Some(1), "still enabled");
+    assert!(
+        matches!(err, StoreError::ConstraintViolation),
+        "got {err:?}"
+    );
+    assert_eq!(
+        fetch_i64(&db, "mode_state", id, "enable_flag"),
+        Some(1),
+        "still enabled"
+    );
 }
 
 #[test]
@@ -917,7 +1063,10 @@ fn restricted_tables_set_matches_design_four_tables() {
     assert!(write::is_restricted_table("grant_conditions"));
     assert!(write::is_restricted_table("mode_state"));
     assert!(write::is_restricted_table("deny_notes"));
-    assert!(!write::is_restricted_table("resources"), "授予性表不受 enable_flag 禁限");
+    assert!(
+        !write::is_restricted_table("resources"),
+        "授予性表不受 enable_flag 禁限"
+    );
     assert!(!write::is_restricted_table("principals"));
 }
 
@@ -1015,7 +1164,10 @@ fn second_insert_of_normalized_duplicate_name_is_rejected_by_partial_unique() {
             .map(|_| ())
         })
         .expect_err("normalized-duplicate name must be rejected");
-    assert!(matches!(err, StoreError::ConstraintViolation), "partial unique → ConstraintViolation, got {err:?}");
+    assert!(
+        matches!(err, StoreError::ConstraintViolation),
+        "partial unique → ConstraintViolation, got {err:?}"
+    );
 }
 
 // ============================================================ 系统协调写（sweeper）
@@ -1026,7 +1178,13 @@ fn system_update_is_idempotent_predicate_write_without_optimistic_lock() {
     let db = fresh_db();
     let idgen = idgen_at(1_767_225_600_500);
     let now = Timestamp::from_unix_ms(1_767_225_600_500);
-    let id = insert_resource(&db, &idgen, now, &Actor::Operator("human".to_string()), "sweepable");
+    let id = insert_resource(
+        &db,
+        &idgen,
+        now,
+        &Actor::Operator("human".to_string()),
+        "sweepable",
+    );
     let predicate = format!("id = {id}");
     let affected = db
         .with_write_txn(|txn| {
@@ -1042,9 +1200,20 @@ fn system_update_is_idempotent_predicate_write_without_optimistic_lock() {
         })
         .expect("system update");
     assert_eq!(affected, 1, "predicate matched exactly one row");
-    assert_eq!(fetch_text(&db, "resources", id, "codename"), Some("swept".to_string()));
-    assert_eq!(fetch_i64(&db, "resources", id, "version"), Some(1), "version still increments");
-    assert_eq!(fetch_text(&db, "resources", id, "updated_by"), Some("system".to_string()), "system actor");
+    assert_eq!(
+        fetch_text(&db, "resources", id, "codename"),
+        Some("swept".to_string())
+    );
+    assert_eq!(
+        fetch_i64(&db, "resources", id, "version"),
+        Some(1),
+        "version still increments"
+    );
+    assert_eq!(
+        fetch_text(&db, "resources", id, "updated_by"),
+        Some("system".to_string()),
+        "system actor"
+    );
 }
 
 // ============================================================ 错误枚举语义分明
@@ -1059,8 +1228,14 @@ fn version_conflict_and_constraint_violation_are_distinct_variants() {
     assert!(!matches!(cv, StoreError::VersionConflict));
     assert!(!matches!(io, StoreError::VersionConflict));
     // 文案不回显库路径/SQL 片段（机密红线 7.5）——仅常量英文。
-    assert_eq!(StoreError::VersionConflict.to_string(), "optimistic-lock version conflict");
-    assert_eq!(StoreError::ConstraintViolation.to_string(), "constraint violation");
+    assert_eq!(
+        StoreError::VersionConflict.to_string(),
+        "optimistic-lock version conflict"
+    );
+    assert_eq!(
+        StoreError::ConstraintViolation.to_string(),
+        "constraint violation"
+    );
 }
 
 // ============================================================ 事务回滚原语
@@ -1088,7 +1263,11 @@ fn with_write_txn_rolls_back_when_closure_returns_err() {
         Err(StoreError::Io)
     });
     assert!(res.is_err());
-    assert_eq!(count_rows(&db, "resources"), before, "inserted row rolled back, none persisted");
+    assert_eq!(
+        count_rows(&db, "resources"),
+        before,
+        "inserted row rolled back, none persisted"
+    );
 }
 
 #[test]
@@ -1104,9 +1283,16 @@ fn with_write_txn_commits_when_closure_returns_ok() {
 
 /// 物理行计数（运行期拼接纯 COUNT(*)，无作用域过滤；pagination 豁免）。
 fn count_rows(db: &Db, table: &str) -> i64 {
-    let q = format!("{} COUNT(*) {} {}", kw(&["SEL", "ECT"]), kw(&["FR", "OM"]), table);
+    let q = format!(
+        "{} COUNT(*) {} {}",
+        kw(&["SEL", "ECT"]),
+        kw(&["FR", "OM"]),
+        table
+    );
     db.with_read(|conn| {
-        let n: i64 = conn.query_row(&q, [], |r| r.get(0)).map_err(|_| StoreError::Io)?;
+        let n: i64 = conn
+            .query_row(&q, [], |r| r.get(0))
+            .map_err(|_| StoreError::Io)?;
         Ok(n)
     })
     .unwrap_or(-1)

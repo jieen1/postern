@@ -21,7 +21,9 @@ use postern_store::base::db::Db;
 use postern_store::base::error::StoreError;
 use postern_store::base::write::{self, Actor, InsertRow};
 use postern_store::migrate;
-use postern_store::schema::{self, BASE_COLUMNS, BUSINESS_TABLES, CURRENT_SCHEMA_VERSION, RESTRICTED_TABLES};
+use postern_store::schema::{
+    self, BASE_COLUMNS, BUSINESS_TABLES, CURRENT_SCHEMA_VERSION, RESTRICTED_TABLES,
+};
 use rusqlite::types::Value;
 
 // ============================================================ 运行期 SQL 片段拼接
@@ -58,6 +60,29 @@ fn migrated_db() -> Db {
     db
 }
 
+/// 构造一个**旧 v1 库**：只施加 v0→v1 前向步（建全套业务表，schema.sql 全文），
+/// 把 `user_version` 钉在 1，且**不**建 v2 才有的 `policy_meta` 表——即 v1 实现写出
+/// 的库形态。DDL 文本取自被测 `ddl::forward_steps` 返回的 v0→v1 步（其 `ddl` 是常量，
+/// 字面 needle 落在 schema.sql 而非本测试源），经 `execute_batch` 施加，源文本不含
+/// 连续建表 needle（与 base.rs 夹具同纪律）。供 v1→v2 前向迁移往返测试构造前置态。
+fn v1_db() -> Db {
+    use postern_store::migrate::ddl;
+    let db = Db::open_in_memory().expect("in-memory db opens");
+    let steps = ddl::forward_steps(0).expect("forward steps from empty");
+    let v0_to_v1 = steps
+        .iter()
+        .find(|s| s.from == 0 && s.to == 1)
+        .expect("v0->v1 step exists");
+    db.with_write_txn(|txn| {
+        txn.execute_batch(v0_to_v1.ddl)
+            .map_err(|_| StoreError::Io)?;
+        Ok(())
+    })
+    .expect("v0->v1 DDL builds business tables");
+    migrate::set_schema_version(&db, 1).expect("pin user_version at v1");
+    db
+}
+
 /// 表的列清单（`PRAGMA table_info`，无任何读关键词 needle）。返回小写列名集合。
 fn columns_of(db: &Db, table: &str) -> Vec<String> {
     let pragma = format!("PRAGMA table_info({table})");
@@ -86,7 +111,9 @@ fn count_where(db: &Db, table: &str, predicate: &str) -> i64 {
         predicate,
     );
     db.with_read(|conn| {
-        let n: i64 = conn.query_row(&q, [], |r| r.get(0)).map_err(|_| StoreError::Io)?;
+        let n: i64 = conn
+            .query_row(&q, [], |r| r.get(0))
+            .map_err(|_| StoreError::Io)?;
         Ok(n)
     })
     .expect("count query")
@@ -121,7 +148,10 @@ fn insert_principal(db: &Db, idgen: &IdGen, now: Timestamp, name: &str) -> Resul
             InsertRow {
                 table: "principals",
                 columns: vec!["name", "kind"],
-                values: vec![Value::Text(name.to_string()), Value::Text("agent".to_string())],
+                values: vec![
+                    Value::Text(name.to_string()),
+                    Value::Text("agent".to_string()),
+                ],
                 enable_flag: 1,
             },
         )?;
@@ -130,7 +160,12 @@ fn insert_principal(db: &Db, idgen: &IdGen, now: Timestamp, name: &str) -> Resul
 }
 
 /// 经 base 唯一写路径插一行 resources（业务列 codename/adapter/transport），返回 id。
-fn insert_resource(db: &Db, idgen: &IdGen, now: Timestamp, codename: &str) -> Result<i64, StoreError> {
+fn insert_resource(
+    db: &Db,
+    idgen: &IdGen,
+    now: Timestamp,
+    codename: &str,
+) -> Result<i64, StoreError> {
     db.with_write_txn(|txn| {
         let id = write::insert(
             txn,
@@ -219,7 +254,10 @@ fn migrate_empty_db_builds_all_business_tables() {
     // §8-一F-15 / §5.2：空库 → migrate 建全套业务表（user_version==0 分流到 init_schema）。
     let db = migrated_db();
     for t in BUSINESS_TABLES {
-        assert!(table_exists(&db, t), "business table {t} must be created by migrate");
+        assert!(
+            table_exists(&db, t),
+            "business table {t} must be created by migrate"
+        );
     }
 }
 
@@ -228,7 +266,10 @@ fn migrate_empty_db_advances_user_version_to_current() {
     // §8-一F-15：空库建库后 user_version 前进至当前最高已知版本。
     let db = migrated_db();
     let v = migrate::schema_version(&db).expect("read user_version");
-    assert_eq!(v, CURRENT_SCHEMA_VERSION, "user_version advances to current after build");
+    assert_eq!(
+        v, CURRENT_SCHEMA_VERSION,
+        "user_version advances to current after build"
+    );
 }
 
 #[test]
@@ -242,7 +283,11 @@ fn migrate_is_idempotent_at_current_version() {
         CURRENT_SCHEMA_VERSION,
         "idempotent migrate leaves version unchanged"
     );
-    assert_eq!(count_where(&db, "principals", "1 = 1"), before, "no rows touched");
+    assert_eq!(
+        count_where(&db, "principals", "1 = 1"),
+        before,
+        "no rows touched"
+    );
 }
 
 #[test]
@@ -271,7 +316,11 @@ fn migrate_unknown_higher_version_leaves_db_unchanged() {
         bumped,
         "version stays at the higher value, migrate did not rewind or advance it"
     );
-    assert_eq!(count_where(&db, "roles", "1 = 1"), rows_before, "no DDL ran, rows unchanged");
+    assert_eq!(
+        count_where(&db, "roles", "1 = 1"),
+        rows_before,
+        "no DDL ran, rows unchanged"
+    );
 }
 
 #[test]
@@ -284,7 +333,96 @@ fn init_schema_on_empty_db_yields_current_version() {
         CURRENT_SCHEMA_VERSION,
         "init_schema advances user_version to current"
     );
-    assert!(table_exists(&db, "mode_state"), "init_schema creates the full table set");
+    assert!(
+        table_exists(&db, "mode_state"),
+        "init_schema creates the full table set"
+    );
+}
+
+#[test]
+fn migrate_v1_to_v2_advances_version_and_creates_policy_meta() {
+    // §8-一F-15：旧 v1 库（无 policy_meta）→ migrate 单事务前向追平至 v2、建 policy_meta、
+    // 版本前进至当前。前向步只建表不破坏数据（往返：v1 → migrate → v2）。
+    let db = v1_db();
+    assert_eq!(
+        migrate::schema_version(&db).expect("v1 version"),
+        1,
+        "starts at v1"
+    );
+    assert!(
+        !table_exists(&db, "policy_meta"),
+        "v1 db has no policy_meta yet"
+    );
+
+    migrate::migrate(&db).expect("v1->v2 forward migration succeeds");
+
+    assert_eq!(
+        migrate::schema_version(&db).expect("post-migrate version"),
+        CURRENT_SCHEMA_VERSION,
+        "user_version advances from v1 to current (v2)"
+    );
+    assert!(
+        table_exists(&db, "policy_meta"),
+        "v1->v2 step creates policy_meta table"
+    );
+}
+
+#[test]
+fn migrate_v1_to_v2_preserves_existing_business_data() {
+    // §8-一F-15：v1→v2 前向迁移只建新表、绝不改写已有数据——迁移前写入的业务行
+    // 在迁移后逐行存活（往返数据不变性：写 v1 → migrate → 行仍在）。
+    let db = v1_db();
+    let idgen = idgen_at(EPOCH_UNIX_MS);
+    let now = now_at(EPOCH_UNIX_MS);
+    let pid = insert_principal(&db, &idgen, now, "alice").expect("insert principal at v1");
+    let rid = insert_resource(&db, &idgen, now, "db-main").expect("insert resource at v1");
+
+    migrate::migrate(&db).expect("v1->v2 forward migration succeeds");
+
+    assert_eq!(
+        migrate::schema_version(&db).expect("version after migrate"),
+        CURRENT_SCHEMA_VERSION,
+        "reached v2"
+    );
+    assert_eq!(
+        count_where(
+            &db,
+            "principals",
+            &format!("id = {pid} AND delete_flag = 0")
+        ),
+        1,
+        "the principal written under v1 survives the v1->v2 migration"
+    );
+    assert_eq!(
+        count_where(&db, "resources", &format!("id = {rid} AND delete_flag = 0")),
+        1,
+        "the resource written under v1 survives the v1->v2 migration"
+    );
+}
+
+#[test]
+fn migrate_v1_to_v2_then_bump_seeds_policy_rev() {
+    // §8-一F-15：v1→v2 迁出的 policy_meta 是空表（惰性播种）——首读 policy_rev 得 0，
+    // 首次 bump 落 1，验证迁移建的表与 store 写路径无缝衔接（往返后写路径可用）。
+    use postern_store::base::meta::read_policy_rev;
+    use postern_store::base::write;
+    let db = v1_db();
+    migrate::migrate(&db).expect("v1->v2 forward migration succeeds");
+
+    assert_eq!(
+        read_policy_rev(&db).expect("read after migrate"),
+        0,
+        "freshly migrated -> rev 0"
+    );
+    let bumped = db
+        .with_write_txn(write::bump_policy_rev)
+        .expect("first bump on migrated policy_meta");
+    assert_eq!(bumped, 1, "first bump seeds policy_rev = 1");
+    assert_eq!(
+        read_policy_rev(&db).expect("read after bump"),
+        1,
+        "persisted rev is 1"
+    );
 }
 
 // ============================================================ B-1 / F-11 八基础列
@@ -310,7 +448,16 @@ fn base_columns_constant_is_the_canonical_eight() {
     assert_eq!(BASE_COLUMNS.len(), 8, "exactly eight base columns");
     assert_eq!(
         BASE_COLUMNS,
-        ["id", "version", "created_at", "created_by", "updated_at", "updated_by", "delete_flag", "enable_flag"],
+        [
+            "id",
+            "version",
+            "created_at",
+            "created_by",
+            "updated_at",
+            "updated_by",
+            "delete_flag",
+            "enable_flag"
+        ],
         "base columns match 5.1-① in order"
     );
 }
@@ -399,7 +546,11 @@ fn roles_table_accepts_non_admin_role_name() {
             Ok(id.as_raw() as i64)
         })
         .expect("non-admin role name accepted");
-    assert_eq!(count_where(&db, "roles", &format!("id = {id}")), 1, "operator role row landed");
+    assert_eq!(
+        count_where(&db, "roles", &format!("id = {id}")),
+        1,
+        "operator role row landed"
+    );
 }
 
 // ============================================================ F-10 partial unique 归一化
@@ -465,7 +616,11 @@ fn restricted_tables_reject_enable_flag_zero() {
         let (cols, vals): (Vec<&'static str>, Vec<Value>) = match t {
             "grant_constraints" => (
                 vec!["resource_id", "capability", "kind"],
-                vec![Value::Integer(rid), Value::Text("query".into()), Value::Text("table_allow".into())],
+                vec![
+                    Value::Integer(rid),
+                    Value::Text("query".into()),
+                    Value::Text("table_allow".into()),
+                ],
             ),
             "grant_conditions" => (
                 vec!["resource_id", "predicate"],
@@ -477,7 +632,11 @@ fn restricted_tables_reject_enable_flag_zero() {
             ),
             "deny_notes" => (
                 vec!["resource_id", "capability", "note"],
-                vec![Value::Integer(rid), Value::Text("query".into()), Value::Text("nope".into())],
+                vec![
+                    Value::Integer(rid),
+                    Value::Text("query".into()),
+                    Value::Text("nope".into()),
+                ],
             ),
             other => panic!("unexpected restricted table {other}"),
         };
@@ -502,7 +661,11 @@ fn restricted_tables_reject_enable_flag_zero() {
             matches!(err, StoreError::ConstraintViolation),
             "restricted table {t} enable_flag=0 → ConstraintViolation, got {err:?}"
         );
-        assert_eq!(count_where(&db, t, "1 = 1"), 0, "rejected write left no row in {t}");
+        assert_eq!(
+            count_where(&db, t, "1 = 1"),
+            0,
+            "rejected write left no row in {t}"
+        );
     }
 }
 
@@ -531,8 +694,15 @@ fn restricted_table_enable_flag_zero_leaves_db_unchanged() {
             Ok(())
         })
         .expect_err("mode_state enable_flag=0 rejected");
-    assert!(matches!(err, StoreError::ConstraintViolation), "rejected, got {err:?}");
-    assert_eq!(count_where(&db, "mode_state", "1 = 1"), before, "rejected write left no row");
+    assert!(
+        matches!(err, StoreError::ConstraintViolation),
+        "rejected, got {err:?}"
+    );
+    assert_eq!(
+        count_where(&db, "mode_state", "1 = 1"),
+        before,
+        "rejected write left no row"
+    );
 }
 
 #[test]
@@ -558,7 +728,11 @@ fn restricted_table_accepts_enable_flag_one() {
         Ok(())
     })
     .expect("enable_flag=1 mode_state row lands");
-    assert_eq!(count_where(&db, "mode_state", "1 = 1"), 1, "one mode row present");
+    assert_eq!(
+        count_where(&db, "mode_state", "1 = 1"),
+        1,
+        "one mode row present"
+    );
 }
 
 /// schema.sql 中以 `CHECK (enable_flag = 1)` 禁 enable_flag 的全部表（§5.2）。包含 base
@@ -576,15 +750,15 @@ const ENABLE_FLAG_CHECK_TABLES: [&str; 6] = [
 
 /// 某限制性表的最小业务列/值（满足 NOT NULL / FK / 枚举 CHECK），enable_flag 由调用方
 /// 单独控制。`rid`/`pid` 是已存在的父 resource/principal id（满足外键）。
-fn restricted_biz_cols_vals(
-    t: &str,
-    rid: i64,
-    pid: i64,
-) -> (Vec<&'static str>, Vec<Value>) {
+fn restricted_biz_cols_vals(t: &str, rid: i64, pid: i64) -> (Vec<&'static str>, Vec<Value>) {
     match t {
         "grant_constraints" => (
             vec!["resource_id", "capability", "kind"],
-            vec![Value::Integer(rid), Value::Text("query".into()), Value::Text("table_allow".into())],
+            vec![
+                Value::Integer(rid),
+                Value::Text("query".into()),
+                Value::Text("table_allow".into()),
+            ],
         ),
         "grant_conditions" => (
             vec!["resource_id", "predicate"],
@@ -596,14 +770,24 @@ fn restricted_biz_cols_vals(
         ),
         "deny_notes" => (
             vec!["resource_id", "capability", "note"],
-            vec![Value::Integer(rid), Value::Text("query".into()), Value::Text("nope".into())],
+            vec![
+                Value::Integer(rid),
+                Value::Text("query".into()),
+                Value::Text("nope".into()),
+            ],
         ),
         "credentials" => (
             vec!["principal_id", "kind"],
             vec![Value::Integer(pid), Value::Text("api_key".into())],
         ),
         "temp_grants" => (
-            vec!["principal_id", "resource_id", "capability", "granted_at", "expires_at"],
+            vec![
+                "principal_id",
+                "resource_id",
+                "capability",
+                "granted_at",
+                "expires_at",
+            ],
             vec![
                 Value::Integer(pid),
                 Value::Integer(rid),
@@ -660,8 +844,9 @@ fn schema_check_rejects_enable_flag_zero_independent_of_base_shortcircuit() {
         let probe_id = 10_001 + i as i64;
         // 完整行：8 基础列（enable_flag=0 是被测越界值）+ 业务列。
         let (cols, vals) = full_row(t, rid, pid, probe_id, 0);
-        let err = ddl_check_probe(&db, t, &cols, vals)
-            .expect_err(&format!("table {t}: direct enable_flag=0 write must hit DDL CHECK(enable_flag=1)"));
+        let err = ddl_check_probe(&db, t, &cols, vals).expect_err(&format!(
+            "table {t}: direct enable_flag=0 write must hit DDL CHECK(enable_flag=1)"
+        ));
         assert!(
             matches!(err, StoreError::ConstraintViolation),
             "table {t} enable_flag=0 → ConstraintViolation via DDL CHECK, got {err:?}"
@@ -688,8 +873,9 @@ fn direct_write_enable_flag_one_passes_check_on_all_restricted_tables() {
         let t = *t;
         let probe_id = 20_001 + i as i64;
         let (cols, vals) = full_row(t, rid, pid, probe_id, 1);
-        ddl_check_probe(&db, t, &cols, vals)
-            .unwrap_or_else(|e| panic!("table {t}: enable_flag=1 direct write must pass CHECK, got {e:?}"));
+        ddl_check_probe(&db, t, &cols, vals).unwrap_or_else(|e| {
+            panic!("table {t}: enable_flag=1 direct write must pass CHECK, got {e:?}")
+        });
         assert_eq!(
             count_where(&db, t, &format!("id = {probe_id}")),
             1,
@@ -744,7 +930,10 @@ fn role_capabilities_check_rejects_unknown_verb() {
             Ok(())
         })
         .expect_err("unknown capability verb must hit CHECK");
-    assert!(matches!(err, StoreError::ConstraintViolation), "unknown verb rejected, got {err:?}");
+    assert!(
+        matches!(err, StoreError::ConstraintViolation),
+        "unknown verb rejected, got {err:?}"
+    );
 }
 
 #[test]
@@ -792,7 +981,11 @@ fn role_capabilities_check_accepts_the_six_canonical_verbs() {
         })
         .unwrap_or_else(|e| panic!("canonical verb {verb} must be accepted, got {e:?}"));
     }
-    assert_eq!(count_where(&db, "role_capabilities", "1 = 1"), 6, "all six verbs landed");
+    assert_eq!(
+        count_where(&db, "role_capabilities", "1 = 1"),
+        6,
+        "all six verbs landed"
+    );
 }
 
 #[test]
@@ -819,7 +1012,10 @@ fn mode_state_check_rejects_unknown_mode() {
             Ok(())
         })
         .expect_err("unknown mode must hit CHECK");
-    assert!(matches!(err, StoreError::ConstraintViolation), "unknown mode rejected, got {err:?}");
+    assert!(
+        matches!(err, StoreError::ConstraintViolation),
+        "unknown mode rejected, got {err:?}"
+    );
 }
 
 #[test]
@@ -845,7 +1041,10 @@ fn principals_kind_check_rejects_unknown_kind() {
             Ok(())
         })
         .expect_err("unknown principal kind must hit CHECK");
-    assert!(matches!(err, StoreError::ConstraintViolation), "unknown kind rejected, got {err:?}");
+    assert!(
+        matches!(err, StoreError::ConstraintViolation),
+        "unknown kind rejected, got {err:?}"
+    );
 }
 
 // ============================================================ F-11 全局模式哨兵唯一
@@ -922,7 +1121,11 @@ fn mode_state_distinct_resource_scopes_coexist() {
         })
         .expect("distinct-scope mode lands");
     }
-    assert_eq!(count_where(&db, "mode_state", "1 = 1"), 2, "two distinct-scope mode rows coexist");
+    assert_eq!(
+        count_where(&db, "mode_state", "1 = 1"),
+        2,
+        "two distinct-scope mode rows coexist"
+    );
 }
 
 // ============================================================ F-9 固定宽度时间列
@@ -933,9 +1136,14 @@ fn time_columns_carry_width_24_check() {
     let db = migrated_db();
     let idgen = idgen_at(EPOCH_UNIX_MS + 15);
     let now = now_at(EPOCH_UNIX_MS + 15);
-    let id = insert_principal(&db, &idgen, now, "p-time").expect("principal lands with width-24 time");
+    let id =
+        insert_principal(&db, &idgen, now, "p-time").expect("principal lands with width-24 time");
     // 经 base 写出的 created_at/updated_at 满足 CHECK，故行存在；这是 width-24 兜底的正向证。
-    assert_eq!(count_where(&db, "principals", &format!("id = {id}")), 1, "width-24 time passed CHECK");
+    assert_eq!(
+        count_where(&db, "principals", &format!("id = {id}")),
+        1,
+        "width-24 time passed CHECK"
+    );
 }
 
 #[test]
@@ -966,7 +1174,11 @@ fn created_at_wrong_width_is_rejected_by_check() {
         matches!(err, StoreError::ConstraintViolation),
         "wrong-width created_at hits width-24 CHECK, got {err:?}"
     );
-    assert_eq!(count_where(&db, "principals", "id = 9001"), 0, "rejected row left no trace");
+    assert_eq!(
+        count_where(&db, "principals", "id = 9001"),
+        0,
+        "rejected row left no trace"
+    );
 }
 
 #[test]
@@ -994,7 +1206,11 @@ fn updated_at_wrong_width_is_rejected_by_check() {
         matches!(err, StoreError::ConstraintViolation),
         "wrong-width updated_at hits width-24 CHECK, got {err:?}"
     );
-    assert_eq!(count_where(&db, "principals", "id = 9002"), 0, "rejected row left no trace");
+    assert_eq!(
+        count_where(&db, "principals", "id = 9002"),
+        0,
+        "rejected row left no trace"
+    );
 }
 
 #[test]
@@ -1017,7 +1233,11 @@ fn valid_width_24_time_passes_check_via_direct_write() {
         Value::Text("agent".to_string()),
     ];
     ddl_check_probe(&db, "principals", &cols, vals).expect("24-wide time passes width CHECK");
-    assert_eq!(count_where(&db, "principals", "id = 9003"), 1, "valid-width row landed");
+    assert_eq!(
+        count_where(&db, "principals", "id = 9003"),
+        1,
+        "valid-width row landed"
+    );
 }
 
 // ============================================================ §5.2 partial unique 重建
@@ -1031,13 +1251,28 @@ fn partial_unique_allows_rebuild_after_logical_delete() {
     let id = insert_principal(&db, &idgen, now, "p-dup").expect("first p-dup lands");
     // 逻辑移除首条（delete_flag=1），其退出活跃集，partial unique 不再覆盖它。
     db.with_write_txn(|txn| {
-        write::logical_delete(txn, now, &Actor::System, "principals", SnowflakeId::from_raw(id as u64), 0)
+        write::logical_delete(
+            txn,
+            now,
+            &Actor::System,
+            "principals",
+            SnowflakeId::from_raw(id as u64),
+            0,
+        )
     })
     .expect("logical delete first row");
     // 同名重建：活跃集内无 p-dup，partial unique 放行新行。
     insert_principal(&db, &idgen, now, "p-dup").expect("rebuild same name after logical delete");
-    assert_eq!(count_where(&db, "principals", "name = 'p-dup' AND delete_flag = 0"), 1, "one active row");
-    assert_eq!(count_where(&db, "principals", "name = 'p-dup'"), 2, "history row retained");
+    assert_eq!(
+        count_where(&db, "principals", "name = 'p-dup' AND delete_flag = 0"),
+        1,
+        "one active row"
+    );
+    assert_eq!(
+        count_where(&db, "principals", "name = 'p-dup'"),
+        2,
+        "history row retained"
+    );
 }
 
 #[test]
@@ -1047,8 +1282,12 @@ fn active_set_partial_unique_rejects_live_duplicate() {
     let idgen = idgen_at(EPOCH_UNIX_MS + 17);
     let now = now_at(EPOCH_UNIX_MS + 17);
     insert_principal(&db, &idgen, now, "p-live").expect("first lands");
-    let err = insert_principal(&db, &idgen, now, "p-live").expect_err("live duplicate name rejected");
-    assert!(matches!(err, StoreError::ConstraintViolation), "live dup rejected, got {err:?}");
+    let err =
+        insert_principal(&db, &idgen, now, "p-live").expect_err("live duplicate name rejected");
+    assert!(
+        matches!(err, StoreError::ConstraintViolation),
+        "live dup rejected, got {err:?}"
+    );
 }
 
 // ============================================================ schema 元数据一致性
@@ -1058,7 +1297,14 @@ fn business_tables_constant_matches_created_tables() {
     // §5.2：BUSINESS_TABLES 常量与 schema 实际建出的表一一对应（无遗漏、无幽灵）。
     let db = migrated_db();
     for t in BUSINESS_TABLES {
-        assert!(table_exists(&db, t), "declared business table {t} exists in built schema");
+        assert!(
+            table_exists(&db, t),
+            "declared business table {t} exists in built schema"
+        );
     }
-    assert_eq!(schema::CURRENT_SCHEMA_VERSION, CURRENT_SCHEMA_VERSION, "version constant is stable");
+    assert_eq!(
+        schema::CURRENT_SCHEMA_VERSION,
+        CURRENT_SCHEMA_VERSION,
+        "version constant is stable"
+    );
 }

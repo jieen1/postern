@@ -13,7 +13,19 @@ pub const SCHEMA_SQL: &str = include_str!("schema.sql");
 
 /// 当前实现内置的"最高已知 schema 版本"。空库建库后 `PRAGMA user_version` 前进至此；
 /// 迁移读库版本与之比对分三态处置（相等幂等 / 更低前向迁移 / 更高 fail-closed）。
-pub const CURRENT_SCHEMA_VERSION: i64 = 1;
+///
+/// v2 起新增持久 `policy_meta` 键值表（承载单调 `policy_rev`），由 v1→v2 前向步建表
+/// 并播种 `policy_rev = 0`（见 [`crate::migrate::ddl`]）。
+pub const CURRENT_SCHEMA_VERSION: i64 = 2;
+
+/// 持久元数据表名（v2 起）：键值对承载 store 级标量状态，当前仅 `policy_rev`。
+/// **非业务表**——无 8 基础字段、无逻辑删除语义，故不入 [`BUSINESS_TABLES`]，也不
+/// 受 `delete_flag` 默认作用域约束（其读写落点在 `src/base/`，契约扫描器据路径豁免）。
+pub const POLICY_META_TABLE: &str = "policy_meta";
+
+/// `policy_meta` 中持久策略修订号的键名。其值单调递增、跨重启存活，由
+/// [`crate::base::write::bump_policy_rev`] 原子 +1、[`crate::base::meta::read_policy_rev`] 读取。
+pub const POLICY_REV_KEY: &str = "policy_rev";
 
 /// 统一基础字段（8 列，5.1-①）：每张业务表都必须按此序声明在最前。
 pub const BASE_COLUMNS: [&str; 8] = [

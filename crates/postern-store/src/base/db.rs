@@ -144,4 +144,45 @@ impl Db {
         let read = ReadConn { conn: &guard };
         f(&read)
     }
+
+    /// 提交+重建的单一临界区原语：**一次取写互斥锁**贯穿"写事务 → COMMIT → 提交后只读"
+    /// 两相，使整段对外表现为单一不可分原子步（§3.6 / §7-13）。
+    ///
+    /// 取写锁（poisoned 恢复），先开事务运行 `write`：返 `Ok` → COMMIT，返 `Err` →
+    /// ROLLBACK 且库不变并直接返错（**不**进入第二相，故 rev 不前进、快照不重建——全或无）。
+    /// COMMIT 成功后，在**同一把仍持有的锁**下、于刚提交的连接上构造 [`ReadConn`] 运行
+    /// `after`（递增 rev 的读取、`build_snapshot` 的全量读都在此发生），其结果即整段返回值。
+    ///
+    /// 关键：第二相**不**经 [`with_read`](Db::with_read)/[`with_write_txn`](Db::with_write_txn)
+    /// 二次取锁（本互斥锁非重入，二次取锁将自死锁）；并发读者经 `PolicyView` 在本临界区
+    /// 释放前绝不见 torn 态。`write` 的产出（如各 per-entity 写的 `new_version`）经
+    /// `W` 透传给 `after`。
+    pub fn commit_and_rebuild<W, A, T>(&self, write: W, after: A) -> Result<T, StoreError>
+    where
+        W: FnOnce(&rusqlite::Transaction<'_>) -> Result<T, StoreError>,
+        A: FnOnce(&ReadConn<'_>, T) -> Result<T, StoreError>,
+    {
+        // 第一相：取写锁（poisoned 恢复），开事务跑 write。返 Err → ROLLBACK 且不进
+        // 第二相（rev 不前进、快照不重建——全或无）；返 Ok → COMMIT。
+        let mut guard = self.lock();
+        let produced = {
+            let txn = guard.transaction().map_err(|_| StoreError::Io)?;
+            match write(&txn) {
+                Ok(value) => {
+                    txn.commit().map_err(|_| StoreError::Io)?;
+                    value
+                }
+                Err(e) => {
+                    let _ = txn.rollback();
+                    return Err(e);
+                }
+            }
+        };
+
+        // 第二相：在**同一把仍持有的锁**下、于刚提交的连接上构 ReadConn 跑 after（递增
+        // rev 的读取、build_snapshot 全量读都在此发生）。绝不经 with_read/with_write_txn
+        // 二次取锁（本互斥锁非重入，二次取锁将自死锁）。
+        let read = ReadConn { conn: &guard };
+        after(&read, produced)
+    }
 }

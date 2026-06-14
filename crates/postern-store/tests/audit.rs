@@ -46,7 +46,10 @@ fn event(kind: &str, decision: &str) -> AuditEvent {
         v: 1,
         kind: kind.to_string(),
         entry: "mcp".to_string(),
-        origin: Origin::UnixPeer { uid: 1000, gid: 1000 },
+        origin: Origin::UnixPeer {
+            uid: 1000,
+            gid: 1000,
+        },
         principal: None,
         resource: ResourceCode::new("db-main"),
         capability: Some(Capability::Query),
@@ -114,7 +117,13 @@ fn record_serializes_event_id_as_snowflake_string() {
     sink.record(event("request", "allow")).expect("record ok");
 
     let page = sink
-        .scan(&AuditFilter::all(), PageQuery { page_no: 1, page_size: 20 })
+        .scan(
+            &AuditFilter::all(),
+            PageQuery {
+                page_no: 1,
+                page_size: 20,
+            },
+        )
         .expect("scan ok");
     assert_eq!(page.items.len(), 1, "one record scanned back");
     let id = &page.items[0].id;
@@ -165,7 +174,10 @@ fn scan_returns_date_files_in_reverse_chronological_order() {
         kind: "request".to_string(),
         ts: "2026-06-10T00:00:00.000Z".to_string(),
         entry: "mcp".to_string(),
-        origin: OriginEnvelope::UnixPeer { uid: 1000, gid: 1000 },
+        origin: OriginEnvelope::UnixPeer {
+            uid: 1000,
+            gid: 1000,
+        },
         decision: "allow".to_string(),
         resource: "db-main".to_string(),
         policy_rev: 1,
@@ -177,7 +189,10 @@ fn scan_returns_date_files_in_reverse_chronological_order() {
         kind: "request".to_string(),
         ts: "2026-06-11T00:00:00.000Z".to_string(),
         entry: "mcp".to_string(),
-        origin: OriginEnvelope::UnixPeer { uid: 1000, gid: 1000 },
+        origin: OriginEnvelope::UnixPeer {
+            uid: 1000,
+            gid: 1000,
+        },
         decision: "deny".to_string(),
         resource: "db-main".to_string(),
         policy_rev: 2,
@@ -195,17 +210,20 @@ fn scan_returns_date_files_in_reverse_chronological_order() {
     .expect("write newer");
 
     let page = sink
-        .scan(&AuditFilter::all(), PageQuery { page_no: 1, page_size: 20 })
+        .scan(
+            &AuditFilter::all(),
+            PageQuery {
+                page_no: 1,
+                page_size: 20,
+            },
+        )
         .expect("scan ok");
     assert_eq!(page.items.len(), 2, "both records scanned");
     assert_eq!(
         page.items[0].id, "200",
         "newer-date record comes first (reverse order)"
     );
-    assert_eq!(
-        page.items[1].id, "100",
-        "older-date record comes second"
-    );
+    assert_eq!(page.items[1].id, "100", "older-date record comes second");
 }
 
 #[test] // §8 F-13: scan 分页窗口截断——page_size 截断、命中页满即停
@@ -217,7 +235,13 @@ fn scan_truncates_to_page_window() {
     }
 
     let page = sink
-        .scan(&AuditFilter::all(), PageQuery { page_no: 1, page_size: 2 })
+        .scan(
+            &AuditFilter::all(),
+            PageQuery {
+                page_no: 1,
+                page_size: 2,
+            },
+        )
         .expect("scan ok");
     assert_eq!(page.items.len(), 2, "page window truncates to page_size=2");
     assert_eq!(page.page_size, 2, "envelope echoes page_size");
@@ -232,7 +256,13 @@ fn scan_clamps_oversized_page_size_to_max() {
     sink.record(event("request", "allow")).expect("record");
 
     let page = sink
-        .scan(&AuditFilter::all(), PageQuery { page_no: 1, page_size: 201 })
+        .scan(
+            &AuditFilter::all(),
+            PageQuery {
+                page_no: 1,
+                page_size: 201,
+            },
+        )
         .expect("scan ok");
     // clamp(201) == 200：信封回显的 page_size 恒为 clamp 后的合法上限。
     assert_eq!(page.page_size, 200, "page_size 201 clamps to MAX_SIZE 200");
@@ -247,10 +277,22 @@ fn scan_second_page_returns_next_window() {
     }
 
     let p1 = sink
-        .scan(&AuditFilter::all(), PageQuery { page_no: 1, page_size: 2 })
+        .scan(
+            &AuditFilter::all(),
+            PageQuery {
+                page_no: 1,
+                page_size: 2,
+            },
+        )
         .expect("scan p1");
     let p2 = sink
-        .scan(&AuditFilter::all(), PageQuery { page_no: 2, page_size: 2 })
+        .scan(
+            &AuditFilter::all(),
+            PageQuery {
+                page_no: 2,
+                page_size: 2,
+            },
+        )
         .expect("scan p2");
     assert_eq!(p2.items.len(), 2, "second page also full");
     assert_eq!(p2.page_no, 2, "second page echoes page_no=2");
@@ -271,7 +313,13 @@ fn scan_filters_by_kind() {
     sink.record(event("request", "allow")).expect("r3");
 
     let page = sink
-        .scan(&AuditFilter::by_kind("deny"), PageQuery { page_no: 1, page_size: 20 })
+        .scan(
+            &AuditFilter::by_kind("deny"),
+            PageQuery {
+                page_no: 1,
+                page_size: 20,
+            },
+        )
         .expect("scan ok");
     assert_eq!(page.items.len(), 1, "only the single deny event matches");
     assert_eq!(page.items[0].kind, "deny", "matched record kind is deny");
@@ -284,12 +332,21 @@ fn scan_origin_is_store_local_envelope() {
     sink.record(event("request", "allow")).expect("record");
 
     let page = sink
-        .scan(&AuditFilter::all(), PageQuery { page_no: 1, page_size: 20 })
+        .scan(
+            &AuditFilter::all(),
+            PageQuery {
+                page_no: 1,
+                page_size: 20,
+            },
+        )
         .expect("scan ok");
     let rec = &page.items[0];
     assert_eq!(
         rec.origin,
-        OriginEnvelope::UnixPeer { uid: 1000, gid: 1000 },
+        OriginEnvelope::UnixPeer {
+            uid: 1000,
+            gid: 1000
+        },
         "origin round-trips into the store-local UnixPeer envelope, not ConnOrigin"
     );
 }
@@ -323,7 +380,13 @@ fn high_value_events_are_durable_before_record_returns() {
     );
     // 落盘事实仍需可被独立扫回（durable 之后必然可见）。
     let page = sink
-        .scan(&AuditFilter::all(), PageQuery { page_no: 1, page_size: 20 })
+        .scan(
+            &AuditFilter::all(),
+            PageQuery {
+                page_no: 1,
+                page_size: 20,
+            },
+        )
         .expect("scan ok");
     let kinds: Vec<&str> = page.items.iter().map(|r| r.kind.as_str()).collect();
     assert!(kinds.contains(&"deny"), "deny durable before return");
@@ -342,7 +405,8 @@ fn allow_event_is_durable_per_event_by_default() {
     let dir = temp_data_dir("allowdef");
     let sink = JsonlAuditSink::new(&dir, FsyncPolicy::PerEvent);
     assert_eq!(sink.fsync_count(), 0, "no fsync before any record");
-    sink.record(event("request", "allow")).expect("record allow");
+    sink.record(event("request", "allow"))
+        .expect("record allow");
     // PerEvent 缺省下 allow 也逐事件 fsync：返回时计数恰为 1（钉 fsync 这一确切结果，
     // 而非仅"扫回可见"）。短路 sink.rs 的 fsync 分支会令此断言跑红。
     assert_eq!(
@@ -352,14 +416,23 @@ fn allow_event_is_durable_per_event_by_default() {
     );
 
     let page = sink
-        .scan(&AuditFilter::all(), PageQuery { page_no: 1, page_size: 20 })
+        .scan(
+            &AuditFilter::all(),
+            PageQuery {
+                page_no: 1,
+                page_size: 20,
+            },
+        )
         .expect("scan ok");
     assert_eq!(
         page.items.len(),
         1,
         "default PerEvent: allow event is durable immediately after record returns"
     );
-    assert_eq!(page.items[0].decision, "allow", "the durable record is the allow");
+    assert_eq!(
+        page.items[0].decision, "allow",
+        "the durable record is the allow"
+    );
 }
 
 #[test] // §8 F-14: relaxed 的判别维度——allow 类跳过逐事件 fsync，高价值类仍逐事件 fsync
@@ -369,7 +442,8 @@ fn relaxed_skips_per_event_fsync_for_allow_but_not_high_value() {
 
     // relaxed 下 allow 类不逐事件 fsync：写三条 allow，fsync 计数恒为 0（与 PerEvent 区分）。
     for _ in 0..3 {
-        sink.record(event("request", "allow")).expect("record allow");
+        sink.record(event("request", "allow"))
+            .expect("record allow");
     }
     assert_eq!(
         sink.fsync_count(),
@@ -387,9 +461,18 @@ fn relaxed_skips_per_event_fsync_for_allow_but_not_high_value() {
 
     // allow 行仍如实落盘可扫回（relaxed 只放宽 fsync 批次，不丢事件）。
     let page = sink
-        .scan(&AuditFilter::all(), PageQuery { page_no: 1, page_size: 20 })
+        .scan(
+            &AuditFilter::all(),
+            PageQuery {
+                page_no: 1,
+                page_size: 20,
+            },
+        )
         .expect("scan ok");
-    assert_eq!(page.total, 4, "all four events are written regardless of fsync timing");
+    assert_eq!(
+        page.total, 4,
+        "all four events are written regardless of fsync timing"
+    );
 }
 
 // ===========================================================================
@@ -421,7 +504,10 @@ fn record_storage_unavailable_surfaces_err_verbatim() {
         "storage-unavailable is the exact Err; the domain never self-decides allow/deny"
     );
     // 失败结果恰是该失败、不是 Ok：fail-closed 不吞错。
-    assert!(result.is_err(), "a failed audit write is never reported as success");
+    assert!(
+        result.is_err(),
+        "a failed audit write is never reported as success"
+    );
 }
 
 // ===========================================================================
@@ -543,7 +629,10 @@ fn enforce_retention_deletes_whole_expired_files() {
     }
 
     let removed = sink.enforce_retention("2026-06-12").expect("retention ok");
-    assert_eq!(removed, 2, "two files older than retention_days=2 are deleted");
+    assert_eq!(
+        removed, 2,
+        "two files older than retention_days=2 are deleted"
+    );
 
     let remaining = jsonl_files(&audit_dir);
     assert_eq!(
@@ -603,7 +692,10 @@ fn write_padded_day_file(audit_dir: &Path, seed_date: &str, min_bytes: usize) {
         kind: "request".to_string(),
         ts: "2026-06-13T00:00:00.000Z".to_string(),
         entry: "mcp".to_string(),
-        origin: OriginEnvelope::UnixPeer { uid: 1000, gid: 1000 },
+        origin: OriginEnvelope::UnixPeer {
+            uid: 1000,
+            gid: 1000,
+        },
         decision: "allow".to_string(),
         resource: "p".repeat(min_bytes),
         policy_rev: 1,
@@ -618,13 +710,19 @@ fn write_padded_day_file(audit_dir: &Path, seed_date: &str, min_bytes: usize) {
 
 /// 把审计落盘占用直接顶过高水位线：在 `<data_dir>/audit` 里铺一个 ≥ 配额的合法大日文件。
 /// 返回 sink（已装配小配额）。`seed_date` 用于命名被铺的日文件（控制是否在保留窗口内）。
-fn sink_pushed_over_water(tag: &str, quota_bytes: u64, retention_days: u32, seed_date: &str) -> (PathBuf, JsonlAuditSink) {
+fn sink_pushed_over_water(
+    tag: &str,
+    quota_bytes: u64,
+    retention_days: u32,
+    seed_date: &str,
+) -> (PathBuf, JsonlAuditSink) {
     let dir = temp_data_dir(tag);
     let audit_dir = dir.join("audit");
     fs::create_dir_all(&audit_dir).expect("mk audit dir");
     // 合法 JSONL，体量 ≥ quota：used_bytes 必越过 high_water（= quota*90%），且 scan 可解析。
     write_padded_day_file(&audit_dir, seed_date, (quota_bytes as usize) + 64);
-    let sink = JsonlAuditSink::with_limits(&dir, FsyncPolicy::PerEvent, quota_bytes, retention_days);
+    let sink =
+        JsonlAuditSink::with_limits(&dir, FsyncPolicy::PerEvent, quota_bytes, retention_days);
     (dir, sink)
 }
 
@@ -633,13 +731,20 @@ fn over_high_water_compares_used_against_quota() {
     let dir = temp_data_dir("waterjudge");
     let sink = JsonlAuditSink::with_limits(&dir, FsyncPolicy::PerEvent, 1000, 30);
     // 空目录：占用 0 < high_water(900) → 未逼近。
-    assert!(!sink.over_high_water().expect("ok"), "empty audit is below water-mark");
+    assert!(
+        !sink.over_high_water().expect("ok"),
+        "empty audit is below water-mark"
+    );
     assert_eq!(sink.high_water_bytes(), 900, "high_water is quota*90%");
 
     let audit_dir = dir.join("audit");
     fs::create_dir_all(&audit_dir).expect("mk audit dir");
     // 铺 950 字节 ≥ high_water(900) → 越过水位。
-    fs::write(audit_dir.join("2026-06-13.jsonl"), "y".repeat(950).as_bytes()).expect("seed");
+    fs::write(
+        audit_dir.join("2026-06-13.jsonl"),
+        "y".repeat(950).as_bytes(),
+    )
+    .expect("seed");
     assert!(
         sink.over_high_water().expect("ok"),
         "used_bytes(950) >= high_water(900) → over water-mark (used vs quota is actually compared)"
@@ -651,11 +756,15 @@ fn degraded_downsamples_low_value_but_never_drops_high_value() {
     // 配额小：第一条 record 进入时占用已越过水位 → 后续走降级分支。
     // 种子文件用远未来日界，确保不被强制轮转回收、水位判定与真实墙钟无关。
     let (_dir, sink) = sink_pushed_over_water("downsample", 1000, 30, "2999-12-31");
-    assert!(sink.over_high_water().expect("ok"), "seeded over water-mark");
+    assert!(
+        sink.over_high_water().expect("ok"),
+        "seeded over water-mark"
+    );
 
     // 灌入大量低价值 allow：降级下应被降采样，丢弃数严格为正（不是每条都落）。
     for _ in 0..200 {
-        sink.record(event("request", "allow")).expect("low-value record returns Ok (no paralysis)");
+        sink.record(event("request", "allow"))
+            .expect("low-value record returns Ok (no paralysis)");
     }
     assert!(
         sink.downsampled_count() > 0,
@@ -663,35 +772,68 @@ fn degraded_downsamples_low_value_but_never_drops_high_value() {
     );
 
     // 高价值类穿插写入：降级下绝不被降采样丢弃，每条都可被独立扫回。
-    sink.record(event("policy_change", "allow")).expect("policy_change record");
-    sink.record(event("credential_event", "allow")).expect("credential_event record");
+    sink.record(event("policy_change", "allow"))
+        .expect("policy_change record");
+    sink.record(event("credential_event", "allow"))
+        .expect("credential_event record");
 
     let pc = sink
-        .scan(&AuditFilter::by_kind("policy_change"), PageQuery { page_no: 1, page_size: 200 })
+        .scan(
+            &AuditFilter::by_kind("policy_change"),
+            PageQuery {
+                page_no: 1,
+                page_size: 200,
+            },
+        )
         .expect("scan policy_change");
-    assert_eq!(pc.total, 1, "policy_change is never downsampled away under degradation");
+    assert_eq!(
+        pc.total, 1,
+        "policy_change is never downsampled away under degradation"
+    );
     let ce = sink
-        .scan(&AuditFilter::by_kind("credential_event"), PageQuery { page_no: 1, page_size: 200 })
+        .scan(
+            &AuditFilter::by_kind("credential_event"),
+            PageQuery {
+                page_no: 1,
+                page_size: 200,
+            },
+        )
         .expect("scan credential_event");
-    assert_eq!(ce.total, 1, "credential_event is never downsampled away under degradation");
+    assert_eq!(
+        ce.total, 1,
+        "credential_event is never downsampled away under degradation"
+    );
 }
 
 #[test] // §8 L-14: deny 类按 (principal, window) 聚合 → 写带 count 的聚合记录（而非每次一条），deny 事实不丢
 fn degraded_aggregates_deny_into_count_record() {
     let (_dir, sink) = sink_pushed_over_water("denyagg", 1000, 30, "2999-12-31");
-    assert!(sink.over_high_water().expect("ok"), "seeded over water-mark");
+    assert!(
+        sink.over_high_water().expect("ok"),
+        "seeded over water-mark"
+    );
 
     // 同 principal 反复触发同类 deny：降级下折叠聚合，不逐条打满落盘。
     let floods = 50u64;
     for _ in 0..floods {
-        sink.record(event("deny", "deny")).expect("deny record returns Ok under degradation");
+        sink.record(event("deny", "deny"))
+            .expect("deny record returns Ok under degradation");
     }
     // 收口：把仍开着的窗口刷成带 count 的聚合记录。
     let flushed = sink.flush_deny_aggregates().expect("flush ok");
-    assert!(flushed >= 1, "at least one open deny window is flushed into an aggregate record");
+    assert!(
+        flushed >= 1,
+        "at least one open deny window is flushed into an aggregate record"
+    );
 
     let denies = sink
-        .scan(&AuditFilter::by_kind("deny"), PageQuery { page_no: 1, page_size: 200 })
+        .scan(
+            &AuditFilter::by_kind("deny"),
+            PageQuery {
+                page_no: 1,
+                page_size: 200,
+            },
+        )
         .expect("scan deny");
     // 聚合后 deny 落盘条数远少于灌入条数（被折叠），证伪"每次一条"。
     assert!(
@@ -701,7 +843,10 @@ fn degraded_aggregates_deny_into_count_record() {
     );
     // 至少一条聚合记录带 count，且其 count 累计反映被折叠的 deny 多重性（事实不丢）。
     let counted: Vec<u64> = denies.items.iter().filter_map(|r| r.count).collect();
-    assert!(!counted.is_empty(), "an aggregate deny record carries a count field");
+    assert!(
+        !counted.is_empty(),
+        "an aggregate deny record carries a count field"
+    );
     let total_counted: u64 = counted.iter().sum();
     assert!(
         total_counted >= 1,
@@ -720,14 +865,24 @@ fn degraded_emits_alert_and_forces_rotation_once() {
     // 一个远早于任何合理保留窗口（retention_days=2）的到期文件：必被强制轮转删除。
     write_padded_day_file(&audit_dir, "2000-01-01", 4);
     let sink = JsonlAuditSink::with_limits(&dir, FsyncPolicy::PerEvent, 1000, 2);
-    assert!(sink.over_high_water().expect("ok"), "seeded over water-mark");
-    assert!(!sink.is_degraded(), "not yet entered degraded state before any record");
+    assert!(
+        sink.over_high_water().expect("ok"),
+        "seeded over water-mark"
+    );
+    assert!(
+        !sink.is_degraded(),
+        "not yet entered degraded state before any record"
+    );
 
     // 触发降级路径：写若干事件，进入降级态。
     for _ in 0..5 {
-        sink.record(event("request", "allow")).expect("record under degradation");
+        sink.record(event("request", "allow"))
+            .expect("record under degradation");
     }
-    assert!(sink.is_degraded(), "crossing the water-mark flips into degraded state");
+    assert!(
+        sink.is_degraded(),
+        "crossing the water-mark flips into degraded state"
+    );
 
     // 强制轮转：到期整文件被删（2000-01-01 远早于 retention_days=2 的 cutoff）。
     let remaining = jsonl_files(&audit_dir);
@@ -738,7 +893,13 @@ fn degraded_emits_alert_and_forces_rotation_once() {
 
     // 可见告警事件恰一条（进入降级那一刻落一次，持续逼近期间不反复刷）。
     let alerts = sink
-        .scan(&AuditFilter::by_kind("audit_degraded"), PageQuery { page_no: 1, page_size: 200 })
+        .scan(
+            &AuditFilter::by_kind("audit_degraded"),
+            PageQuery {
+                page_no: 1,
+                page_size: 200,
+            },
+        )
         .expect("scan alerts");
     assert_eq!(
         alerts.total, 1,
@@ -749,7 +910,10 @@ fn degraded_emits_alert_and_forces_rotation_once() {
 #[test] // §8 L-14: 逼近配额绝不全平面瘫痪——低价值 record 仍返 Ok，不把所有请求 fail-closed
 fn degraded_never_paralyzes_the_plane() {
     let (_dir, sink) = sink_pushed_over_water("noparalyze", 1000, 30, "2999-12-31");
-    assert!(sink.over_high_water().expect("ok"), "seeded over water-mark");
+    assert!(
+        sink.over_high_water().expect("ok"),
+        "seeded over water-mark"
+    );
 
     // 即便落盘已逼近配额，低价值 record 也只走可控降级（降采样/Ok），绝不返 Err 令请求全平面瘫痪。
     for _ in 0..100 {
@@ -794,7 +958,10 @@ fn written_line_holds_no_credential_value() {
         "no secret-hash field leaks into the audit line"
     );
     // 行内仍如实承载已脱敏的资源代号与决策。
-    assert!(body.contains("db-main"), "resource code is recorded (sanitized fact)");
+    assert!(
+        body.contains("db-main"),
+        "resource code is recorded (sanitized fact)"
+    );
     assert!(body.contains("credential_event"), "kind is recorded");
 }
 
@@ -850,13 +1017,22 @@ fn scan_round_trips_sanitized_fields_exactly() {
     .expect("write");
 
     let page: Page<AuditRecord> = sink
-        .scan(&AuditFilter::all(), PageQuery { page_no: 1, page_size: 20 })
+        .scan(
+            &AuditFilter::all(),
+            PageQuery {
+                page_no: 1,
+                page_size: 20,
+            },
+        )
         .expect("scan ok");
     assert_eq!(page.items.len(), 1, "one record scanned");
     let got = &page.items[0];
     assert_eq!(got.id, "424242", "id round-trips exactly");
     assert_eq!(got.kind, "request", "kind round-trips exactly");
-    assert_eq!(got.ts, "2026-06-12T08:09:10.123Z", "ts (24-wide UTC) round-trips exactly");
+    assert_eq!(
+        got.ts, "2026-06-12T08:09:10.123Z",
+        "ts (24-wide UTC) round-trips exactly"
+    );
     assert_eq!(got.ts.len(), 24, "ts is exactly 24 wide");
     assert_eq!(got.decision, "allow", "decision round-trips exactly");
     assert_eq!(got.resource, "db-main", "resource round-trips exactly");

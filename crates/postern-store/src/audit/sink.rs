@@ -145,8 +145,8 @@ impl JsonlAuditSink {
     /// 保留期回收：删除早于 `audit.retention_days` 的整文件
     /// （append-only 域唯一允许的删除形态——整文件删除，非行级修改）。返回删除的文件数。
     pub fn enforce_retention(&self, now_utc_date: &str) -> Result<usize, AuditError> {
-        let cutoff = retention_cutoff(now_utc_date, self.retention_days)
-            .ok_or(AuditError::WriteFailed)?;
+        let cutoff =
+            retention_cutoff(now_utc_date, self.retention_days).ok_or(AuditError::WriteFailed)?;
         let audit_dir = self.audit_dir();
         let entries = match std::fs::read_dir(&audit_dir) {
             Ok(entries) => entries,
@@ -255,7 +255,12 @@ impl JsonlAuditSink {
     ///
     /// `durable`：高价值类或 PerEvent 下恒 true（逐事件 fsync）；relaxed 下 allow 类 false。
     /// 调用方须自持 `append_lock`（追加顺序与 fsync 批次自洽）。
-    fn append_record(&self, record: &AuditRecord, now_ms: u64, durable: bool) -> Result<(), AuditError> {
+    fn append_record(
+        &self,
+        record: &AuditRecord,
+        now_ms: u64,
+        durable: bool,
+    ) -> Result<(), AuditError> {
         let line = record.to_jsonl().map_err(|_| AuditError::WriteFailed)?;
         let date = utc_date(now_ms).ok_or(AuditError::WriteFailed)?;
         let path = self.file_for_date(&date);

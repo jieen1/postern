@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::base::db::Db;
+use crate::base::db::{Db, ReadConn};
 use crate::base::error::StoreError;
 use postern_core::domain::{
     Capability, ConditionSpec, ConstraintSpec, CredentialMeta, CredentialTier, CredentialView,
@@ -101,23 +101,34 @@ struct ModeRow {
 /// 加载；角色继承展开、授权空间物化、约束/条件挂载，全部在本调用内完成。
 /// 任一加载/解析失败 ⇒ fail-closed（该格不可见 / 整体拒绝），绝不产半截放行的快照。
 pub fn build_snapshot(db: &Db, policy_rev: u64) -> Result<PolicySnapshot, StoreError> {
+    db.with_read(|conn| build_snapshot_on(conn, policy_rev))
+}
+
+/// 在调用方已持有的只读连接上把权威库投影为不可变 [`PolicySnapshot`]，语义同
+/// [`build_snapshot`]。供"提交+重建"编排在**同一写锁临界区**内、事务 COMMIT 后于
+/// 持有的连接上重建（避免对非重入互斥锁二次取锁——见
+/// [`Db::commit_and_rebuild`](crate::base::db::Db::commit_and_rebuild)）。
+pub fn build_snapshot_on(
+    conn: &ReadConn<'_>,
+    policy_rev: u64,
+) -> Result<PolicySnapshot, StoreError> {
     // ---- 授予性表加载（delete_flag = 0 AND enable_flag = 1）。
-    let resources = load_resources(db)?; // id -> ResourceCode（活跃+启用，悬挂引用判定的真集）
-    let roles = load_roles(db)?; // id -> Role 名（活跃+启用）
-    let role_caps = load_role_capabilities(db)?;
-    let inherits = load_role_inherits(db)?;
-    let bindings = load_bindings(db)?;
-    let scopes = load_binding_scope(db)?;
-    let labels = load_resource_labels(db)?;
-    let temp_grants = load_temp_grants(db)?;
-    let tiers = load_tiers(db, &resources)?;
-    let credentials = load_credentials(db)?;
+    let resources = load_resources(conn)?; // id -> ResourceCode（活跃+启用，悬挂引用判定的真集）
+    let roles = load_roles(conn)?; // id -> Role 名（活跃+启用）
+    let role_caps = load_role_capabilities(conn)?;
+    let inherits = load_role_inherits(conn)?;
+    let bindings = load_bindings(conn)?;
+    let scopes = load_binding_scope(conn)?;
+    let labels = load_resource_labels(conn)?;
+    let temp_grants = load_temp_grants(conn)?;
+    let tiers = load_tiers(conn, &resources)?;
+    let credentials = load_credentials(conn)?;
 
     // ---- 限制性表加载（仅 delete_flag = 0，绝不引入 enable_flag 过滤）。
-    let deny_notes = load_deny_notes(db, &resources)?;
-    let constraints = load_constraints(db)?;
-    let conditions = load_conditions(db)?;
-    let mode_rows = load_mode_state(db)?;
+    let deny_notes = load_deny_notes(conn, &resources)?;
+    let constraints = load_constraints(conn)?;
+    let conditions = load_conditions(conn)?;
+    let mode_rows = load_mode_state(conn)?;
 
     // ---- 角色 → 有效动词（含继承传递闭包；返回 capability -> 声明它的 role_id）。
     let role_effective = expand_role_capabilities(&role_caps, &inherits);
@@ -139,7 +150,9 @@ pub fn build_snapshot(db: &Db, policy_rev: u64) -> Result<PolicySnapshot, StoreE
         };
         for res_code in scope_resources {
             for (cap, role_id) in effective {
-                let Some(action) = action_of(&role_effective_action(&role_caps, &inherits, *role_id, cap)) else {
+                let Some(action) =
+                    action_of(&role_effective_action(&role_caps, &inherits, *role_id, cap))
+                else {
                     continue;
                 };
                 let Some(role_name) = roles.get(role_id) else {
@@ -240,30 +253,28 @@ pub fn build_snapshot(db: &Db, policy_rev: u64) -> Result<PolicySnapshot, StoreE
 ///
 /// 集合加载恒经 `LIMIT + 游标`分块（绝不无界全表 SELECT，`DB_PAGINATION_MANDATORY`）；
 /// 任一行映射失败 ⇒ fail-closed `Err`（不产半截结果）。
-fn load_paged<T, M>(db: &Db, select: &str, map: M) -> Result<Vec<T>, StoreError>
+fn load_paged<T, M>(conn: &ReadConn<'_>, select: &str, map: M) -> Result<Vec<T>, StoreError>
 where
     M: Fn(&rusqlite::Row<'_>) -> Result<T, StoreError>,
 {
-    db.with_read(|conn| {
-        let mut out = Vec::new();
-        let mut offset: i64 = 0;
-        loop {
-            let mut stmt = conn.prepare(select).map_err(|_| StoreError::Io)?;
-            let mut rows = stmt
-                .query(rusqlite::params![LOAD_PAGE, offset])
-                .map_err(|_| StoreError::Io)?;
-            let mut n: i64 = 0;
-            while let Some(row) = rows.next().map_err(|_| StoreError::Io)? {
-                out.push(map(row)?);
-                n += 1;
-            }
-            if n < LOAD_PAGE {
-                break;
-            }
-            offset += LOAD_PAGE;
+    let mut out = Vec::new();
+    let mut offset: i64 = 0;
+    loop {
+        let mut stmt = conn.prepare(select).map_err(|_| StoreError::Io)?;
+        let mut rows = stmt
+            .query(rusqlite::params![LOAD_PAGE, offset])
+            .map_err(|_| StoreError::Io)?;
+        let mut n: i64 = 0;
+        while let Some(row) = rows.next().map_err(|_| StoreError::Io)? {
+            out.push(map(row)?);
+            n += 1;
         }
-        Ok(out)
-    })
+        if n < LOAD_PAGE {
+            break;
+        }
+        offset += LOAD_PAGE;
+    }
+    Ok(out)
 }
 
 fn get_i64(row: &rusqlite::Row<'_>, idx: usize) -> Result<i64, StoreError> {
@@ -284,27 +295,27 @@ fn get_opt_text(row: &rusqlite::Row<'_>, idx: usize) -> Result<Option<String>, S
 
 // ============================================================ 各表加载（self-contained SELECT）
 
-fn load_resources(db: &Db) -> Result<BTreeMap<i64, ResourceCode>, StoreError> {
+fn load_resources(conn: &ReadConn<'_>) -> Result<BTreeMap<i64, ResourceCode>, StoreError> {
     let select = "SELECT id, codename FROM resources \
                   WHERE delete_flag = 0 AND enable_flag = 1 ORDER BY id LIMIT ?1 OFFSET ?2";
-    let rows = load_paged(db, select, |r| Ok((get_i64(r, 0)?, get_text(r, 1)?)))?;
+    let rows = load_paged(conn, select, |r| Ok((get_i64(r, 0)?, get_text(r, 1)?)))?;
     Ok(rows
         .into_iter()
         .map(|(id, code)| (id, ResourceCode::new(code)))
         .collect())
 }
 
-fn load_roles(db: &Db) -> Result<BTreeMap<i64, String>, StoreError> {
+fn load_roles(conn: &ReadConn<'_>) -> Result<BTreeMap<i64, String>, StoreError> {
     let select = "SELECT id, name FROM roles \
                   WHERE delete_flag = 0 AND enable_flag = 1 ORDER BY id LIMIT ?1 OFFSET ?2";
-    let rows = load_paged(db, select, |r| Ok((get_i64(r, 0)?, get_text(r, 1)?)))?;
+    let rows = load_paged(conn, select, |r| Ok((get_i64(r, 0)?, get_text(r, 1)?)))?;
     Ok(rows.into_iter().collect())
 }
 
-fn load_role_capabilities(db: &Db) -> Result<Vec<RoleCapRow>, StoreError> {
+fn load_role_capabilities(conn: &ReadConn<'_>) -> Result<Vec<RoleCapRow>, StoreError> {
     let select = "SELECT role_id, capability, action FROM role_capabilities \
                   WHERE delete_flag = 0 AND enable_flag = 1 ORDER BY id LIMIT ?1 OFFSET ?2";
-    load_paged(db, select, |r| {
+    load_paged(conn, select, |r| {
         Ok(RoleCapRow {
             role_id: get_i64(r, 0)?,
             capability: get_text(r, 1)?,
@@ -313,10 +324,10 @@ fn load_role_capabilities(db: &Db) -> Result<Vec<RoleCapRow>, StoreError> {
     })
 }
 
-fn load_role_inherits(db: &Db) -> Result<Vec<InheritRow>, StoreError> {
+fn load_role_inherits(conn: &ReadConn<'_>) -> Result<Vec<InheritRow>, StoreError> {
     let select = "SELECT role_id, parent_role_id FROM role_inherits \
                   WHERE delete_flag = 0 AND enable_flag = 1 ORDER BY id LIMIT ?1 OFFSET ?2";
-    load_paged(db, select, |r| {
+    load_paged(conn, select, |r| {
         Ok(InheritRow {
             role_id: get_i64(r, 0)?,
             parent_role_id: get_i64(r, 1)?,
@@ -324,10 +335,10 @@ fn load_role_inherits(db: &Db) -> Result<Vec<InheritRow>, StoreError> {
     })
 }
 
-fn load_bindings(db: &Db) -> Result<Vec<BindingRow>, StoreError> {
+fn load_bindings(conn: &ReadConn<'_>) -> Result<Vec<BindingRow>, StoreError> {
     let select = "SELECT id, principal_id, role_id FROM bindings \
                   WHERE delete_flag = 0 AND enable_flag = 1 ORDER BY id LIMIT ?1 OFFSET ?2";
-    load_paged(db, select, |r| {
+    load_paged(conn, select, |r| {
         Ok(BindingRow {
             id: get_i64(r, 0)?,
             principal_id: get_i64(r, 1)?,
@@ -336,10 +347,10 @@ fn load_bindings(db: &Db) -> Result<Vec<BindingRow>, StoreError> {
     })
 }
 
-fn load_binding_scope(db: &Db) -> Result<Vec<ScopeRow>, StoreError> {
+fn load_binding_scope(conn: &ReadConn<'_>) -> Result<Vec<ScopeRow>, StoreError> {
     let select = "SELECT binding_id, kind, resource_id, selector FROM binding_scope \
                   WHERE delete_flag = 0 AND enable_flag = 1 ORDER BY id LIMIT ?1 OFFSET ?2";
-    load_paged(db, select, |r| {
+    load_paged(conn, select, |r| {
         Ok(ScopeRow {
             binding_id: get_i64(r, 0)?,
             kind: get_text(r, 1)?,
@@ -349,10 +360,10 @@ fn load_binding_scope(db: &Db) -> Result<Vec<ScopeRow>, StoreError> {
     })
 }
 
-fn load_resource_labels(db: &Db) -> Result<Vec<LabelRow>, StoreError> {
+fn load_resource_labels(conn: &ReadConn<'_>) -> Result<Vec<LabelRow>, StoreError> {
     let select = "SELECT resource_id, key, value FROM resource_labels \
                   WHERE delete_flag = 0 AND enable_flag = 1 ORDER BY id LIMIT ?1 OFFSET ?2";
-    load_paged(db, select, |r| {
+    load_paged(conn, select, |r| {
         Ok(LabelRow {
             resource_id: get_i64(r, 0)?,
             key: get_text(r, 1)?,
@@ -361,10 +372,10 @@ fn load_resource_labels(db: &Db) -> Result<Vec<LabelRow>, StoreError> {
     })
 }
 
-fn load_temp_grants(db: &Db) -> Result<Vec<TempGrantRow>, StoreError> {
+fn load_temp_grants(conn: &ReadConn<'_>) -> Result<Vec<TempGrantRow>, StoreError> {
     let select = "SELECT principal_id, resource_id, capability FROM temp_grants \
                   WHERE delete_flag = 0 AND enable_flag = 1 ORDER BY id LIMIT ?1 OFFSET ?2";
-    load_paged(db, select, |r| {
+    load_paged(conn, select, |r| {
         Ok(TempGrantRow {
             principal_id: get_i64(r, 0)?,
             resource_id: get_i64(r, 1)?,
@@ -374,12 +385,12 @@ fn load_temp_grants(db: &Db) -> Result<Vec<TempGrantRow>, StoreError> {
 }
 
 fn load_tiers(
-    db: &Db,
+    conn: &ReadConn<'_>,
     resources: &BTreeMap<i64, ResourceCode>,
 ) -> Result<BTreeMap<ResourceCode, Vec<TierDecl>>, StoreError> {
     let select = "SELECT resource_id, tier, capabilities FROM resource_credential_tiers \
                   WHERE delete_flag = 0 AND enable_flag = 1 ORDER BY id LIMIT ?1 OFFSET ?2";
-    let rows = load_paged(db, select, |r| {
+    let rows = load_paged(conn, select, |r| {
         Ok((get_i64(r, 0)?, get_text(r, 1)?, get_opt_text(r, 2)?))
     })?;
     let mut out: BTreeMap<ResourceCode, Vec<TierDecl>> = BTreeMap::new();
@@ -399,10 +410,10 @@ fn load_tiers(
     Ok(out)
 }
 
-fn load_credentials(db: &Db) -> Result<CredentialView, StoreError> {
+fn load_credentials(conn: &ReadConn<'_>) -> Result<CredentialView, StoreError> {
     let select = "SELECT principal_id, kind, secret_hash FROM credentials \
                   WHERE delete_flag = 0 AND enable_flag = 1 ORDER BY id LIMIT ?1 OFFSET ?2";
-    let rows = load_paged(db, select, |r| {
+    let rows = load_paged(conn, select, |r| {
         Ok((get_i64(r, 0)?, get_text(r, 1)?, get_opt_text(r, 2)?))
     })?;
     let credentials = rows
@@ -419,13 +430,13 @@ fn load_credentials(db: &Db) -> Result<CredentialView, StoreError> {
 }
 
 fn load_deny_notes(
-    db: &Db,
+    conn: &ReadConn<'_>,
     resources: &BTreeMap<i64, ResourceCode>,
 ) -> Result<BTreeMap<(ResourceCode, Capability), String>, StoreError> {
     // 限制性表：仅 delete_flag = 0（绝不 enable_flag 过滤，否则解约 fail-open）。
     let select = "SELECT resource_id, capability, note FROM deny_notes \
                   WHERE delete_flag = 0 ORDER BY id LIMIT ?1 OFFSET ?2";
-    let rows = load_paged(db, select, |r| {
+    let rows = load_paged(conn, select, |r| {
         Ok((get_i64(r, 0)?, get_text(r, 1)?, get_text(r, 2)?))
     })?;
     let mut out = BTreeMap::new();
@@ -441,11 +452,11 @@ fn load_deny_notes(
     Ok(out)
 }
 
-fn load_constraints(db: &Db) -> Result<Vec<ConstraintRow>, StoreError> {
+fn load_constraints(conn: &ReadConn<'_>) -> Result<Vec<ConstraintRow>, StoreError> {
     // 限制性表：仅 delete_flag = 0。
     let select = "SELECT resource_id, capability, kind, spec FROM grant_constraints \
                   WHERE delete_flag = 0 ORDER BY id LIMIT ?1 OFFSET ?2";
-    load_paged(db, select, |r| {
+    load_paged(conn, select, |r| {
         Ok(ConstraintRow {
             resource_id: get_i64(r, 0)?,
             capability: get_text(r, 1)?,
@@ -455,11 +466,11 @@ fn load_constraints(db: &Db) -> Result<Vec<ConstraintRow>, StoreError> {
     })
 }
 
-fn load_conditions(db: &Db) -> Result<Vec<ConditionRow>, StoreError> {
+fn load_conditions(conn: &ReadConn<'_>) -> Result<Vec<ConditionRow>, StoreError> {
     // 限制性表：仅 delete_flag = 0。capability 可空（资源级通用条件）。
     let select = "SELECT resource_id, capability, predicate, spec FROM grant_conditions \
                   WHERE delete_flag = 0 ORDER BY id LIMIT ?1 OFFSET ?2";
-    load_paged(db, select, |r| {
+    load_paged(conn, select, |r| {
         Ok(ConditionRow {
             resource_id: get_opt_i64(r, 0)?,
             capability: get_opt_text(r, 1)?,
@@ -469,12 +480,12 @@ fn load_conditions(db: &Db) -> Result<Vec<ConditionRow>, StoreError> {
     })
 }
 
-fn load_mode_state(db: &Db) -> Result<Vec<ModeRow>, StoreError> {
+fn load_mode_state(conn: &ReadConn<'_>) -> Result<Vec<ModeRow>, StoreError> {
     // 限制性表：仅 delete_flag = 0（绝不引入 enable_flag 过滤，否则解冻 fail-open）。
     // scope_resource_id 可空（NULL = 全局模式）。
     let select = "SELECT scope_resource_id, mode FROM mode_state \
                   WHERE delete_flag = 0 ORDER BY id LIMIT ?1 OFFSET ?2";
-    load_paged(db, select, |r| {
+    load_paged(conn, select, |r| {
         Ok(ModeRow {
             scope_resource_id: get_opt_i64(r, 0)?,
             mode: get_text(r, 1)?,
