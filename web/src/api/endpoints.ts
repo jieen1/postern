@@ -50,8 +50,20 @@ export const getCredentials = (
 export const postCredential = (body: unknown) =>
   http.post<WriteAck>('/credentials', body);
 
+// Normalize the deferred read-model projections (effective/direct/inherits_from)
+// to arrays so the page renders even before the backend computes them. Forward-
+// compatible: real projected values, when the backend lands them, override the
+// `??` defaults. (Backend projection is a tracked follow-up.)
 export const getRoles = (page: Partial<PageQuery> = {}) =>
-  http.get<Page<Role>>(`/roles?${buildQuery(page)}`);
+  http.get<Page<Role>>(`/roles?${buildQuery(page)}`).then((res) => ({
+    ...res,
+    items: res.items.map((r) => ({
+      ...r,
+      effective: r.effective ?? [],
+      direct: r.direct ?? [],
+      inherits_from: r.inherits_from ?? [],
+    })),
+  }));
 export const postRole = (body: unknown) => http.post<WriteAck>('/roles', body);
 
 export const getBindings = (page: Partial<PageQuery> = {}) =>
@@ -62,7 +74,12 @@ export const postBinding = (body: unknown) =>
 // ── 资源（含 discover 子动作）─────────────────────────────────────────────────
 
 export const getResources = (page: Partial<PageQuery> = {}) =>
-  http.get<Page<ResourceRow>>(`/resources?${buildQuery(page)}`);
+  http.get<Page<ResourceRow>>(`/resources?${buildQuery(page)}`).then((res) => ({
+    ...res,
+    // tiers/labels are deferred backend projections — default to arrays so the
+    // page renders; real values override when the backend projects them.
+    items: res.items.map((r) => ({ ...r, tiers: r.tiers ?? [], labels: r.labels ?? [] })),
+  }));
 export const postResource = (body: unknown) =>
   http.post<WriteAck>('/resources', body);
 export const discoverResource = (code: string) =>

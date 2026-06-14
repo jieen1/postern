@@ -12,7 +12,8 @@
     "test:watch": "vitest",
     "e2e": "playwright test",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "verify:live": "bash tools/run-verify.sh"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.59.0",

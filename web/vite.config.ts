@@ -16,6 +16,12 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    // web-private form: when a local HTTP->UDS bridge is running, proxy /v1/* to
+    // it (the browser can't speak UDS). Unset in mock (MSW intercepts) / tauri
+    // (tauriTransport via invoke). Also the harness for headless live-backend e2e.
+    proxy: process.env.VITE_API_PROXY
+      ? { '/v1': { target: process.env.VITE_API_PROXY, changeOrigin: true } }
+      : undefined,
   },
   test: {
     globals: true,
