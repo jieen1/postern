@@ -20,7 +20,9 @@ use serde::Deserialize;
 use postern_core::request::ConnOrigin as Origin;
 
 use super::PageParams;
-use crate::control::dto::{ApiErrorBody, WriteAck};
+use crate::control::dto::{
+    ApiErrorBody, WriteAck, WriteConditionReq, WriteConstraintReq, WriteDenyNoteReq,
+};
 use crate::control::endpoints::{
     self, validate_import_on_timeout, validate_settings_on_timeout, WriteHttp,
 };
@@ -41,9 +43,10 @@ pub async fn create_credential(State(_state): State<ControlState>) -> Response {
 
 /// `GET /v1/credentials`：凭据列读（仅元数据 + secret_hash 存在性，绝不出 secret）。
 ///
-/// 凭据读模型的 store 侧投影未接通（无 `list_credentials`，且凭据材料经机密面落地是 D2c）——
-/// 如实回 501 + 稳定码（能力未接通，镜像 `POST /v1/credentials` 的「D2c 未启用」延后），**绝不**
-/// `unimplemented!()` panic（那会经 CatchPanic 折成不可区分的 500）。
+/// 凭据读模型的 store 侧投影未接通（适配器无 `credentials` 读臂，且凭据材料经机密面落地是
+/// D2c）——如实回 501 + 稳定码（能力未接通，镜像 `POST /v1/credentials` 的「D2c 未启用」延后），
+/// **绝不**经适配器走 `list("credentials")`（那会命中适配器未知实体兜底折成不可区分的 500），
+/// 也绝不 `unimplemented!()` panic（那会经 CatchPanic 折成 500）。
 pub async fn list_credentials(
     State(_state): State<ControlState>,
     Query(_page): Query<PageParams>,
@@ -51,49 +54,93 @@ pub async fn list_credentials(
     not_implemented_response()
 }
 
-/// `GET /v1/constraints` 列读：store 侧无 `list_constraints` 读模型（本波次不新增 store 方法）——
-/// 如实回 501 + 稳定码（能力未接通），绝不 panic 折成 500。读模型接通是 D2b-ext。
+/// `GET /v1/constraints` 列读：经 [`endpoints::list`](crate::control::endpoints::list) 取
+/// `Page<ConstraintRow>` 信封（强制分页，F-6）→ 200；store 读失败 ⇒ 500 错误信封（[`list_response`]）。
 pub async fn list_constraints(
-    State(_state): State<ControlState>,
-    Query(_page): Query<PageParams>,
+    State(state): State<ControlState>,
+    Query(page): Query<PageParams>,
 ) -> Response {
-    not_implemented_response()
+    list_response(endpoints::list(state.policy.as_ref(), "constraints", page.to_query()).await)
 }
 
-/// `POST /v1/constraints` 写：store 侧无 constraints `*_and_rebuild` 写接缝——如实回 501 + 稳定码
-/// （能力未接通），绝不 panic 折成 500。写接缝接通是 D2b-ext。
-pub async fn create_constraint(State(_state): State<ControlState>) -> Response {
-    not_implemented_response()
+/// `POST /v1/constraints` 写（同源 create / delete）：`expected_version` 缺 ⇒ 新增、带 ⇒ 乐观锁
+/// 逻辑删除（与适配器 `commit_constraint` 分流对称）。DTO → [`WriteIntent`] →
+/// [`endpoints::write`](crate::control::endpoints::write) 三联动 → 响应（200 WriteAck / 409 / 500）。
+pub async fn create_constraint(
+    State(state): State<ControlState>,
+    Json(body): Json<WriteConstraintReq>,
+) -> Response {
+    let intent = WriteIntent {
+        entity: "constraints",
+        // 字段全透传：store 写解构层据 expected_version 分流 create / delete 并校验必填
+        // （缺字段 ⇒ fail-closed 折为事务级失败 500，绝不放行半态写）。
+        fields: serde_json::json!({
+            "resource_id": body.resource_id,
+            "capability": body.capability,
+            "kind": body.kind,
+            "spec": body.spec,
+            "id": body.id,
+        }),
+        expected_version: body.expected_version,
+    };
+    control_write_response(&state, &intent).await
 }
 
-/// `GET /v1/conditions` 列读：store 侧无 `list_conditions` 读模型——如实回 501 + 稳定码（能力未
-/// 接通），绝不 panic 折成 500。读模型接通是 D2b-ext。
+/// `GET /v1/conditions` 列读：经 [`endpoints::list`](crate::control::endpoints::list) 取
+/// `Page<ConditionRow>` 信封（强制分页，F-6）→ 200；store 读失败 ⇒ 500 错误信封。
 pub async fn list_conditions(
-    State(_state): State<ControlState>,
-    Query(_page): Query<PageParams>,
+    State(state): State<ControlState>,
+    Query(page): Query<PageParams>,
 ) -> Response {
-    not_implemented_response()
+    list_response(endpoints::list(state.policy.as_ref(), "conditions", page.to_query()).await)
 }
 
-/// `POST /v1/conditions` 写：store 侧无 conditions 写接缝——如实回 501 + 稳定码（能力未接通），
-/// 绝不 panic 折成 500。写接缝接通是 D2b-ext。
-pub async fn create_condition(State(_state): State<ControlState>) -> Response {
-    not_implemented_response()
+/// `POST /v1/conditions` 写（同源 create / delete，同 [`create_constraint`] 分流）：DTO →
+/// [`WriteIntent`] → 三联动 → 响应。`resource_id`/`capability` 可空（全局 / 全动词通用条件）。
+pub async fn create_condition(
+    State(state): State<ControlState>,
+    Json(body): Json<WriteConditionReq>,
+) -> Response {
+    let intent = WriteIntent {
+        entity: "conditions",
+        fields: serde_json::json!({
+            "resource_id": body.resource_id,
+            "capability": body.capability,
+            "predicate": body.predicate,
+            "spec": body.spec,
+            "id": body.id,
+        }),
+        expected_version: body.expected_version,
+    };
+    control_write_response(&state, &intent).await
 }
 
-/// `GET /v1/deny-notes` 列读：store 侧无 `list_deny_notes` 读模型——如实回 501 + 稳定码（能力未
-/// 接通），绝不 panic 折成 500。读模型接通是 D2b-ext。
+/// `GET /v1/deny-notes` 列读：经 [`endpoints::list`](crate::control::endpoints::list) 取
+/// `Page<DenyNoteRow>` 信封（强制分页，F-6）→ 200；store 读失败 ⇒ 500 错误信封。
 pub async fn list_deny_notes(
-    State(_state): State<ControlState>,
-    Query(_page): Query<PageParams>,
+    State(state): State<ControlState>,
+    Query(page): Query<PageParams>,
 ) -> Response {
-    not_implemented_response()
+    list_response(endpoints::list(state.policy.as_ref(), "deny_notes", page.to_query()).await)
 }
 
-/// `POST /v1/deny-notes` 写：store 侧无 deny-notes 写接缝——如实回 501 + 稳定码（能力未接通），
-/// 绝不 panic 折成 500。写接缝接通是 D2b-ext。
-pub async fn create_deny_note(State(_state): State<ControlState>) -> Response {
-    not_implemented_response()
+/// `POST /v1/deny-notes` 写（同源 create / delete，同 [`create_constraint`] 分流）：DTO →
+/// [`WriteIntent`] → 三联动 → 响应。
+pub async fn create_deny_note(
+    State(state): State<ControlState>,
+    Json(body): Json<WriteDenyNoteReq>,
+) -> Response {
+    let intent = WriteIntent {
+        entity: "deny_notes",
+        fields: serde_json::json!({
+            "resource_id": body.resource_id,
+            "capability": body.capability,
+            "note": body.note,
+            "id": body.id,
+        }),
+        expected_version: body.expected_version,
+    };
+    control_write_response(&state, &intent).await
 }
 
 /// `GET /v1/settings`：settings 行集列读。
@@ -173,28 +220,8 @@ pub async fn write_settings(
     write_response(http)
 }
 
-/// `POST /v1/grants/temp/elevate` 临时授权骨架。
-pub async fn elevate_grant(State(_state): State<ControlState>) -> Response {
-    unimplemented!("D2b 骨架：grants/temp/elevate handler")
-}
-
-/// `POST /v1/grants/temp/revoke` 撤销骨架。
-pub async fn revoke_grant(State(_state): State<ControlState>) -> Response {
-    unimplemented!("D2b 骨架：grants/temp/revoke handler")
-}
-
-/// `POST /v1/mode` 模式读/写骨架（同源读写：`op:read` 投影 / `op:set` 写，无 GET /v1/mode）。
-pub async fn mode(State(_state): State<ControlState>) -> Response {
-    unimplemented!("D2b 骨架：mode handler（同源读写）")
-}
-
-/// `GET /v1/grants` 授权视图骨架（your_grants + temp_grants）。
-pub async fn grants_view(
-    State(_state): State<ControlState>,
-    Query(_page): Query<PageParams>,
-) -> Response {
-    unimplemented!("D2b 骨架：grants 视图 handler")
-}
+// mode / grants(view) / elevate / revoke 的真身在 mode_grants.rs（router 挂载的是后者）——
+// 此处此前的四个 `unimplemented!()` 重复桩是死代码（无任何引用），已删除（绝不留 panic 死桩）。
 
 // ════════════════════════════════════════════════════════════════════════════
 //  audit-misc 域共享装配辅助（来源 / 操作者 / Page 信封 / 写结果 → 响应）
@@ -215,6 +242,23 @@ fn control_origin() -> Origin {
 /// 透传已认证操作者身份（控制面只交「是谁在写」，五个审计字段由 store base 自动填充）。
 fn control_actor() -> Actor {
     Actor::Operator("control".to_string())
+}
+
+/// 控制面写端点共享装配（细则 / 条件 / 拒绝备注同形态）：把已组装的 [`WriteIntent`] 经标准写端点
+/// 三联动（[`endpoints::write`](crate::control::endpoints::write)：事务 COMMIT + 快照重建 + 审计同
+/// 一写锁临界区，L-14）落地，再把 [`WriteHttp`] 装配为响应（[`write_response`]：Committed 200 +
+/// WriteAck / Conflict 409 / Failed 500）。来源 + 操作者经 [`control_origin`] / [`control_actor`]
+/// 别名构造（镜像 [`write_settings`] 同一占位纪律），绝不字面构造 `ConnOrigin`。
+async fn control_write_response(state: &ControlState, intent: &WriteIntent) -> Response {
+    let http = endpoints::write(
+        state.policy.as_ref(),
+        &state.audit,
+        control_origin(),
+        &control_actor(),
+        intent,
+    )
+    .await;
+    write_response(http)
 }
 
 /// 把集合读结果（`Page<serde_json::Value>` / 读失败）装配为 axum 响应。
@@ -255,6 +299,15 @@ fn write_response(http: WriteHttp) -> Response {
         )
             .into_response(),
         WriteHttp::NotImplemented => not_implemented_response(),
+        // 资源代号不存在（本路径写不反查资源代号，理应不命中；穷尽匹配）⇒ 404。
+        WriteHttp::NotFound => (
+            StatusCode::NOT_FOUND,
+            Json(ApiErrorBody::new(
+                "not_found",
+                "referenced resource not found",
+            )),
+        )
+            .into_response(),
         WriteHttp::Failed => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ApiErrorBody::new("write_failed", "policy write failed")),
@@ -396,7 +449,12 @@ pub async fn import_policy(
         .into_response()
 }
 
-/// `POST /v1/shutdown` 关停骨架（确认令牌 + 优雅收口）。
+/// `POST /v1/shutdown` 关停（确认令牌 + 优雅收口）。
+///
+/// 该路由在 router.rs 被**真实挂载**（CONTROL_ROUTES 表内、`post(misc::shutdown)`），生产路径
+/// 经 serve.rs 的 CatchPanicLayer 兜底——故体内**绝不** `unimplemented!()` panic（那会被折成不可
+/// 区分的 500）。关停语义的真实接线（确认令牌校验 + 优雅收口信号）是后续波次；D2b 与
+/// `list_credentials` / 写接缝未接通族同一纪律，如实回 501 + 稳定机读码（能力未接通，非内部失败 500）。
 pub async fn shutdown(State(_state): State<ControlState>) -> Response {
-    unimplemented!("D2b 骨架：shutdown handler")
+    not_implemented_response()
 }

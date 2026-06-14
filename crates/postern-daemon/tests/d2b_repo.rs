@@ -28,7 +28,7 @@ use postern_core::id::{Clock, IdGen};
 use postern_core::page::PageQuery;
 
 use postern_daemon::control::repo::StorePolicyRepoAdapter;
-use postern_daemon::control::{Actor, PolicyRepo, WriteError, WriteIntent};
+use postern_daemon::control::{Actor, AuditRead, PolicyRepo, WriteError, WriteIntent};
 
 use postern_store::base::db::Db;
 use postern_store::base::meta::read_policy_rev;
@@ -75,6 +75,41 @@ fn store_repo_with_view() -> (Arc<StoreRepo>, Arc<SnapshotView>) {
 /// 控制面操作者（落 created_by / updated_by）。
 fn operator() -> Actor {
     Actor::Operator("tester".to_string())
+}
+
+/// 审计读 Fake（本文件只测 policy.db 写读路径，不触审计载体）——两读支恒回空页。
+struct NoAuditRead;
+impl AuditRead for NoAuditRead {
+    fn scan_audit(
+        &self,
+        page: postern_core::page::PageQuery,
+    ) -> Result<postern_core::page::Page<serde_json::Value>, postern_daemon::error::DaemonError>
+    {
+        Ok(empty_page(page))
+    }
+    fn denials_summary(
+        &self,
+        page: postern_core::page::PageQuery,
+    ) -> Result<postern_core::page::Page<serde_json::Value>, postern_daemon::error::DaemonError>
+    {
+        Ok(empty_page(page))
+    }
+}
+
+/// 空分页信封（回显 clamp 后分页参数、total=0）。
+fn empty_page(page: postern_core::page::PageQuery) -> postern_core::page::Page<serde_json::Value> {
+    let page = page.clamp();
+    postern_core::page::Page {
+        items: Vec::new(),
+        page_no: page.page_no,
+        page_size: page.page_size,
+        total: 0,
+    }
+}
+
+/// 装配适配器（policy.db 写读句柄 + 审计读 Fake）。
+fn adapter_of(store: Arc<StoreRepo>) -> StorePolicyRepoAdapter {
+    StorePolicyRepoAdapter::new(store, Arc::new(NoAuditRead))
 }
 
 /// 一次新增主体的写意图（业务字段 JSON；新增 ⇒ expected_version None）。
@@ -165,7 +200,7 @@ fn store_rename_and_rebuild_version_conflict_is_all_or_nothing() {
 #[test]
 fn adapter_commit_write_advances_policy_rev() {
     let (store, _view) = store_repo_with_view();
-    let adapter = StorePolicyRepoAdapter::new(store);
+    let adapter = adapter_of(store);
 
     let outcome = adapter
         .commit_write(&operator(), &create_principal_intent())
@@ -187,7 +222,7 @@ fn adapter_list_projects_id_as_string() {
     store
         .create_principal_and_rebuild(&StoreActor::Operator("tester".into()), "agent-a", "agent")
         .expect("seed via store write seam");
-    let adapter = StorePolicyRepoAdapter::new(store);
+    let adapter = adapter_of(store);
 
     let page = adapter
         .list(
@@ -218,7 +253,7 @@ fn adapter_commit_write_stale_version_maps_to_version_conflict() {
     let id = store
         .create_principal(&StoreActor::Operator("tester".into()), "agent-a", "agent")
         .expect("seed principal");
-    let adapter = StorePolicyRepoAdapter::new(store);
+    let adapter = adapter_of(store);
 
     // 改名意图带过期期望版本（999 ≠ 实际 0）。
     let intent = WriteIntent {
@@ -240,7 +275,7 @@ fn adapter_commit_write_stale_version_maps_to_version_conflict() {
 #[test]
 fn adapter_policy_rev_reflects_snapshot() {
     let (store, _view) = store_repo_with_view();
-    let adapter = StorePolicyRepoAdapter::new(store);
+    let adapter = adapter_of(store);
     assert_eq!(
         adapter.policy_rev().expect("policy_rev readable"),
         0,

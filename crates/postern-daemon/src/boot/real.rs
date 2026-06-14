@@ -38,9 +38,10 @@ use postern_store::snapshot::view::SnapshotView;
 use crate::assemble::PlaneSpawner;
 use crate::boot::sockets::{create_listener_into, ListenerCell, CONTROL_PERMS, DATA_PERMS};
 use crate::boot::{ConnectableUidProbe, HandleKind, Preconditions, RouterAssembler, SocketFactory};
+use crate::control::audit_read::JsonlAuditReader;
 use crate::control::auth::ControlAuth;
 use crate::control::repo::StorePolicyRepoAdapter;
-use crate::control::{self, ControlState, Enrollment, PolicyRepo};
+use crate::control::{self, AuditRead, ControlState, Enrollment, PolicyRepo};
 use crate::error::{DaemonError, Result};
 
 /// 首份快照的策略修订号（boot 物化首份 `Arc<PolicySnapshot>` 的 rev——后续每次重建递增由
@@ -424,12 +425,23 @@ impl RouterAssembler for RealRouterAssembler {
             Box::new(SystemClock),
             Arc::clone(&view),
         );
-        let policy: Arc<dyn PolicyRepo> =
-            Arc::new(StorePolicyRepoAdapter::new(Arc::new(store_repo)));
-        // 审计支为真实 JsonlAuditSink（写端点三联动审计真实落盘 <audit_dir>/audit/*.jsonl，逐事件
-        // fsync）。Enrollment 仍 fail-closed 桩（凭据写 vault = D2c）。
-        let audit = JsonlAuditSink::new(self.audit_dir.clone(), FsyncPolicy::PerEvent);
-        let state = ControlState::new(policy, Arc::new(BootEnrollment), Arc::new(audit));
+        // 审计载体为真实 JsonlAuditSink（写端点三联动审计真实落盘 <audit_dir>/audit/*.jsonl，逐
+        // 事件 fsync）。同一实例两支共享：写支（`record`）进 ControlState 注入集；读支（`scan` /
+        // deny 聚合）经 JsonlAuditReader 接入 StorePolicyRepoAdapter（`list("audit")` /
+        // `list("denials_summary")`）——审计读 / 写见同一物理载体，单一权威状态、无双源。
+        let audit_sink = Arc::new(JsonlAuditSink::new(
+            self.audit_dir.clone(),
+            FsyncPolicy::PerEvent,
+        ));
+        // 适配器持 policy.db 写读句柄 + 审计读句柄（append-only 载体的读缝，与 policy.db 截然分离）。
+        let audit_read: Arc<dyn AuditRead> =
+            Arc::new(JsonlAuditReader::new(Arc::clone(&audit_sink)));
+        let policy: Arc<dyn PolicyRepo> = Arc::new(StorePolicyRepoAdapter::new(
+            Arc::new(store_repo),
+            audit_read,
+        ));
+        // Enrollment 仍 fail-closed 桩（凭据写 vault = D2c）；audit 写支为同一 JsonlAuditSink 实例。
+        let state = ControlState::new(policy, Arc::new(BootEnrollment), audit_sink);
         // 控制面 router front 认证门（L-1）：SO_PEERCRED uid 主门 + control-token 第二因子
         // （health 豁免 token 仍过 peer 门）。认证为 serve 期接线（control 专用 serve 经
         // serve_control_router_over_uds 注入 PeerUid/Origin）；in-process handler 测试不挂此门。

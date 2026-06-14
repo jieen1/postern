@@ -32,7 +32,7 @@ use postern_core::domain::Mode;
 // control/ 非 shells：需来源类型时以别名读、经 Extension 提取，绝不写字面 `ConnOrigin::` 变体。
 use postern_core::request::ConnOrigin as Origin;
 
-use super::super::dto::{id_to_string, ApiErrorBody, WriteAck};
+use super::super::dto::{ApiErrorBody, WriteAck};
 use super::super::endpoints::{self, WriteHttp};
 use super::super::{Actor, ControlState, WriteIntent};
 use super::PageParams;
@@ -169,6 +169,8 @@ async fn mode_set(
         }
         WriteHttp::Conflict => conflict_response(),
         WriteHttp::NotImplemented => not_implemented_response(),
+        // mode set 不引用资源代号，NotFound 不应发生；为穷尽匹配仍 fail-closed 回 404。
+        WriteHttp::NotFound => not_found_response(),
         WriteHttp::Failed => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "write_failed",
@@ -284,6 +286,8 @@ async fn commit(
         }
         WriteHttp::Conflict => conflict_response(),
         WriteHttp::NotImplemented => not_implemented_response(),
+        // elevate 引用的资源代号不存在 ⇒ 404（客户端引用错，非内部失败）。
+        WriteHttp::NotFound => not_found_response(),
         WriteHttp::Failed => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "write_failed",
@@ -341,13 +345,14 @@ fn project_temp_grants(items: &[serde_json::Value]) -> Vec<serde_json::Value> {
     items
         .iter()
         .map(|row| {
-            // id 纪律：store row 的 i64 雪花 → 十进制字符串（唯一投影点 id_to_string；此处行已是
-            // serde_json，i64 直接字符串化，等价投影——杜绝 JS 端丢精度）。
+            // id 纪律：grants 读模型行经 list_grants 投影时 id 已是十进制字符串（唯一投影点
+            // dto::id_to_string 在 repo 侧完成）；此处如实读字符串，绝不再 as_i64 二次投影
+            // （字符串 as_i64 恒 None → 空 id，破契约且喂废 revoke）。
             let id = row
                 .get("id")
-                .and_then(|v| v.as_i64())
-                .map(|raw| id_to_string(postern_core::id::SnowflakeId::from_raw(raw as u64)))
-                .unwrap_or_default();
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
             serde_json::json!({
                 "id": id,
                 "resource": row.get("resource").cloned().unwrap_or(serde_json::Value::Null),
@@ -399,6 +404,16 @@ fn not_implemented_response() -> Response {
         StatusCode::NOT_IMPLEMENTED,
         crate::error::NOT_IMPLEMENTED_CODE,
         "control capability is not enabled yet",
+    )
+}
+
+/// 写引用的资源不存在 ⇒ 404 + `not_found`（脱敏：绝不回显代号 / 存在性细节）——客户端引用
+/// 了不存在的资源（请求错），而非内部失败 500。
+fn not_found_response() -> Response {
+    error_response(
+        StatusCode::NOT_FOUND,
+        "not_found",
+        "referenced resource not found",
     )
 }
 

@@ -25,6 +25,7 @@
 //! 缺口闭合。
 
 pub mod approvals;
+pub mod audit_read;
 pub mod auth;
 pub mod dto;
 pub mod endpoints;
@@ -104,6 +105,12 @@ pub enum WriteError {
     /// 接通），绝不伪装成 500 内部失败。fail-closed：未实现绝不静默成功 / 伪造写 ack。
     #[error("write capability not implemented")]
     NotImplemented,
+    /// 写所引用的资源代号在库中不存在（如 elevate 指向未登记 / 已删的资源代号）。**刻意与
+    /// [`Transaction`](WriteError::Transaction)（真实事务失败 500）区分**：这是请求引用了不存在
+    /// 的资源（客户端错），store 读成功但无此行（**非**内部失败），端点据此回 **404**，绝不
+    /// 伪装成 500 内部失败。fail-closed：未命中绝不臆造资源 / 静默放行。
+    #[error("referenced resource not found")]
+    ResourceNotFound,
 }
 
 /// 控制面策略事务读写句柄（**daemon 侧注入缝**）。
@@ -132,6 +139,26 @@ pub trait PolicyRepo: Send + Sync {
 
     /// 当前权威快照修订号（`policy_rev`）——读端点 / 审计对账锚点。
     fn policy_rev(&self) -> Result<u64, DaemonError>;
+}
+
+/// 控制面审计**读**句柄（**daemon 侧注入缝**）。
+///
+/// `PolicyRepo`（policy.db 写读句柄）够不到 append-only 审计载体（`JsonlAuditSink::scan` /
+/// deny 聚合）——审计落 JSONL、不走 policy.db 写锁。故控制面注入一个独立的审计读缝：
+/// `list("audit")` / `list("denials_summary")` 经此投影，而非经 policy 读句柄（二者底层载体
+/// 截然不同）。`AuditSink`（注入集合里那只）只有 `record`（写支），故本缝是读支的专用句柄。
+///
+/// 两方法均返回**已投影、已脱敏**的 `Page<serde_json::Value>`（id 一律字符串；资源恒代号、
+/// 绝非真实地址；**绝不**构造 `ConnOrigin`——`origin` 出线为已脱敏不透明文本，公理四 / §5 读模型）。
+/// `page` 先 `clamp`（强制分页，F-6）。同步 IO（文件扫描），调用方在 spawn_blocking 边界驱动（§5）。
+pub trait AuditRead: Send + Sync {
+    /// 审计事件列读（倒序、分页窗口截断）→ 投影为 `AuditEventDto` 的 `Page` 信封。
+    /// 读失败 fail-closed 回 [`DaemonError`]（不伪造空信封）。
+    fn scan_audit(&self, page: PageQuery) -> Result<Page<serde_json::Value>, DaemonError>;
+
+    /// 拒绝摘要（deny 类聚合）列读 → 投影为 `DenialSummaryDto` 的 `Page` 信封。
+    /// 读失败 fail-closed 回 [`DaemonError`]。
+    fn denials_summary(&self, page: PageQuery) -> Result<Page<serde_json::Value>, DaemonError>;
 }
 
 /// 机密面登记（enrollment）接口（**daemon 侧注入缝**）。

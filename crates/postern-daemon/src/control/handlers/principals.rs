@@ -93,6 +93,15 @@ pub async fn create_principal(
             )),
         )
             .into_response(),
+        // 资源代号不存在（principals 写不引用资源代号，理应不命中；穷尽匹配）⇒ 404。
+        WriteHttp::NotFound => (
+            StatusCode::NOT_FOUND,
+            Json(ApiErrorBody::new(
+                "not_found",
+                "referenced resource not found",
+            )),
+        )
+            .into_response(),
         // 其余写失败（事务 / 快照重建 / 审计）⇒ 500 + 错误信封（fail-closed，无半态）。
         WriteHttp::Failed => write_failed().into_response(),
     }

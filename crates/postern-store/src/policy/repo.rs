@@ -1168,6 +1168,27 @@ impl PolicyRepo {
         })
     }
 
+    /// 按资源代号反查资源 id（默认作用域 `delete_flag = 0` + `enable_flag = 1`，`LIMIT 1`）。
+    ///
+    /// `code` 入参经与入库一致的归一化（[`normalize_name`](crate::base::normalize::normalize_name)：
+    /// `trim` + 小写）后比对 `codename`，与 `create_resource` 落库时的归一化对齐，使
+    /// `Db-Main` / ` db-main ` / `DB-MAIN` 三者都能命中同一行。未命中（无此代号 / 已逻辑删除 /
+    /// 已停用）⇒ `Ok(None)`，由调用方 fail-closed 处置（绝不臆造资源）。读经只读连接（`with_read`），
+    /// 写读全经 store API、本读语句与既有 `get_principal` 同形（限定单行 `LIMIT 1`）。
+    pub fn resource_id_by_code(&self, code: &str) -> Result<Option<SnowflakeId>, StoreError> {
+        let normalized = crate::base::normalize::normalize_name(code);
+        let q = "SELECT id FROM resources \
+                 WHERE codename = ?1 AND delete_flag = 0 AND enable_flag = 1 LIMIT 1";
+        self.db.with_read(|conn| {
+            let id = conn
+                .query_row(q, [normalized.as_str()], |r| {
+                    Ok(SnowflakeId::from_raw(r.get::<_, i64>(0)? as u64))
+                })
+                .ok();
+            Ok(id)
+        })
+    }
+
     // ---------------------------------------------------------------- bindings
 
     /// 绑定主体到角色：经 `base::write::insert` 落一行 bindings（业务列

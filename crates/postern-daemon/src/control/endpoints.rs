@@ -52,6 +52,9 @@ pub enum WriteHttp {
     /// 该实体的写接缝尚未接通（store 侧无对应写路径）⇒ HTTP **501 Not Implemented** + 稳定码。
     /// 刻意与 [`Failed`](WriteHttp::Failed)（500 内部失败）区分：明确未实现而非内部坏掉。
     NotImplemented,
+    /// 写引用的资源代号不存在 ⇒ HTTP **404 Not Found**。刻意与 [`Failed`](WriteHttp::Failed)
+    /// （500 内部失败）区分：客户端引用了不存在的资源（请求错），而非服务端内部坏掉。
+    NotFound,
     /// 其余写失败（事务 / 快照重建 / 审计）⇒ 5xx；不 COMMIT、不重建，无半态。
     Failed,
 }
@@ -63,6 +66,7 @@ impl WriteHttp {
             WriteHttp::Committed(_) => 200,
             WriteHttp::Conflict => 409,
             WriteHttp::NotImplemented => 501,
+            WriteHttp::NotFound => 404,
             WriteHttp::Failed => 500,
         }
     }
@@ -74,6 +78,7 @@ impl WriteHttp {
         match err {
             WriteError::VersionConflict => WriteHttp::Conflict,
             WriteError::NotImplemented => WriteHttp::NotImplemented,
+            WriteError::ResourceNotFound => WriteHttp::NotFound,
             WriteError::Transaction => WriteHttp::Failed,
             WriteError::SnapshotRebuild => WriteHttp::Failed,
             WriteError::Audit => WriteHttp::Failed,

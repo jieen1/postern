@@ -31,24 +31,38 @@ use postern_store::base::meta::read_policy_rev;
 use postern_store::base::write::Actor as StoreActor;
 use postern_store::policy::PolicyRepo as StorePolicyRepo;
 
-use super::dto::{PrincipalDto, ResourceDto, RoleDto};
-use super::{Actor, PolicyRepo, WriteError, WriteIntent, WriteOutcome};
+use super::dto::{
+    BindingDto, ConditionDto, ConstraintDto, DenyNoteDto, ModeRowDto, PrincipalDto, ResourceDto,
+    RoleDto, SettingDto, TempGrantDto,
+};
+use super::{Actor, AuditRead, PolicyRepo, WriteError, WriteIntent, WriteOutcome};
 use crate::error::DaemonError;
 
 /// 控制面 [`PolicyRepo`] 的真实 store 适配器：持 [`store::PolicyRepo`](StorePolicyRepo) 写句柄
-/// （`with_view` 装配，写后在同一临界区重建并发布快照）。
+/// （`with_view` 装配，写后在同一临界区重建并发布快照）+ 审计读句柄（append-only 审计载体）。
 ///
 /// 写句柄**绝不**进数据面注入集合（红线 7.2-2）；数据面只读消费同一 `SnapshotView`。本适配器
 /// 是控制面写端点三联动的 store 侧落点。
+///
+/// **审计读第二句柄**（[`audit`](StorePolicyRepoAdapter::audit)）：policy.db 写读句柄
+/// （[`inner`](StorePolicyRepoAdapter::inner)）够不到 append-only 审计载体（JSONL，不走 policy
+/// 写锁）——故适配器另持一个 [`AuditRead`] 缝，`list("audit")` / `list("denials_summary")` 经此
+/// 投影。boot 装配处把真实 [`JsonlAuditReader`](super::audit_read::JsonlAuditReader)（复用三联动
+/// 审计写支的**同一** `JsonlAuditSink` 实例）接上，单一载体、无双源。
 pub struct StorePolicyRepoAdapter {
     /// 底层 store 写句柄（per-entity `*_and_rebuild` 经此驱动）。
     inner: Arc<StorePolicyRepo>,
+    /// 审计读句柄（`list("audit")` / `list("denials_summary")` 经此投影；与 policy.db 载体分离）。
+    audit: Arc<dyn AuditRead>,
 }
 
 impl StorePolicyRepoAdapter {
-    /// 由已装配 [`SnapshotView`] 的 store 写句柄构造适配器（boot 在快照就绪后装配）。
-    pub fn new(inner: Arc<StorePolicyRepo>) -> Self {
-        Self { inner }
+    /// 由已装配 [`SnapshotView`] 的 store 写句柄 + 审计读句柄构造适配器（boot 在快照就绪后装配）。
+    ///
+    /// `audit` 是 append-only 审计载体的读缝（与 policy.db 截然分离）——boot 复用三联动审计写支
+    /// 的同一 `JsonlAuditSink` 实例物化它，使审计读 / 写见同一载体（单一权威状态）。
+    pub fn new(inner: Arc<StorePolicyRepo>, audit: Arc<dyn AuditRead>) -> Self {
+        Self { inner, audit }
     }
 }
 
@@ -90,25 +104,38 @@ impl PolicyRepo for StorePolicyRepoAdapter {
         // 按实体分流到对应 store `*_and_rebuild`（实体写 + rev + 重建同一临界区原子）。
         // 每分支把 intent.fields（DTO 序列化而来）解构成该实体的具体写参数（域内填），
         // intent.expected_version 透传为乐观锁期望版本。store 返 (new_version, new_rev)。
-        let result: Result<(i64, u64), StoreError> = match intent.entity {
-            "principals" => commit_principal(&self.inner, &store_actor, intent),
-            "roles" => commit_role(&self.inner, &store_actor, intent),
-            "resources" => commit_resource(&self.inner, &store_actor, intent),
-            "bindings" => commit_binding(&self.inner, &store_actor, intent),
-            // settings / mode / grants 的写接缝（store 侧专用 *_and_rebuild）留待后续波次——
-            // **绝不**折叠为通用事务失败（500，会让运维误判为 daemon 内部坏掉）；如实回
-            // NotImplemented，端点据此回 501 + 稳定码（能力未接通，镜像 credentials/discover）。
-            // 此前这些实体落 ConstraintViolation→Transaction→500，与真实事务失败不可区分（缺陷）。
-            "settings" | "mode" | "grants" => return Err(WriteError::NotImplemented),
-            // 未知实体类别绝不静默放行：端点固定 entity，理应恒命中；兜底 fail-closed。
-            _ => Err(StoreError::ConstraintViolation),
+        //
+        // grants 分支单独直返 [`WriteError`]（而非经 `to_write_error` 折叠 `StoreError`）：
+        // elevate 的资源**代号**反查未命中是「客户端引用了不存在的资源」（404），须区别于真实
+        // 事务失败（500）——这层区分在 `StoreError` 里不可表达，故 `commit_grant` 直接产出
+        // 富错误（`ResourceNotFound`）。其余实体仍走 `StoreError → to_write_error` 统一映射。
+        let result: Result<(i64, u64), WriteError> = match intent.entity {
+            "grants" => commit_grant(&self.inner, &store_actor, intent),
+            other => {
+                let store_result: Result<(i64, u64), StoreError> = match other {
+                    "principals" => commit_principal(&self.inner, &store_actor, intent),
+                    "roles" => commit_role(&self.inner, &store_actor, intent),
+                    "resources" => commit_resource(&self.inner, &store_actor, intent),
+                    "bindings" => commit_binding(&self.inner, &store_actor, intent),
+                    // 对象细则 / 求值条件 / 拒绝说明：create（expected_version None）/ delete（Some）二分。
+                    "constraints" => commit_constraint(&self.inner, &store_actor, intent),
+                    "conditions" => commit_condition(&self.inner, &store_actor, intent),
+                    "deny_notes" => commit_deny_note(&self.inner, &store_actor, intent),
+                    // 模式（upsert by 辖区）/ 设置（upsert by key）：store 专用 *_and_rebuild 接通。
+                    "mode" => commit_mode(&self.inner, &store_actor, intent),
+                    "settings" => commit_setting(&self.inner, &store_actor, intent),
+                    // 未知实体类别绝不静默放行：端点固定 entity，理应恒命中；兜底 fail-closed。
+                    _ => Err(StoreError::ConstraintViolation),
+                };
+                store_result.map_err(to_write_error)
+            }
         };
         match result {
             Ok((version, new_rev)) => Ok(WriteOutcome {
                 version,
                 policy_rev: new_rev,
             }),
-            Err(e) => Err(to_write_error(e)),
+            Err(e) => Err(e),
         }
     }
 
@@ -124,12 +151,16 @@ impl PolicyRepo for StorePolicyRepoAdapter {
             "roles" => list_roles(&self.inner, page),
             "resources" => list_resources(&self.inner, page),
             "bindings" => list_bindings(&self.inner, page),
-            // 这些读模型的 store 侧投影留待后续波次（无全量 bindings / settings / audit / mode /
-            // grants / denials 读模型）——如实回 NotImplemented，端点据此回 501 + 稳定码（能力未
-            // 接通），**绝不**折叠为 Boot（端点会映成 500，与真实内部失败不可区分，缺陷所在）。
-            "settings" | "audit" | "mode" | "grants" | "denials_summary" => {
-                Err(DaemonError::NotImplemented)
-            }
+            "constraints" => list_constraints(&self.inner, page),
+            "conditions" => list_conditions(&self.inner, page),
+            "deny_notes" => list_deny_notes(&self.inner, page),
+            "settings" => list_settings(&self.inner, page),
+            "mode" => list_mode(&self.inner, page),
+            "grants" => list_grants(&self.inner, page),
+            // 审计读不在 policy.db 载体上（append-only JSONL，不走 policy 写锁）——经第二句柄
+            // （AuditRead）投影。`scan`/deny 聚合见同一 JsonlAuditSink 实例（boot 复用，单一载体）。
+            "audit" => self.audit.scan_audit(page),
+            "denials_summary" => self.audit.denials_summary(page),
             _ => Err(DaemonError::Boot),
         }
     }
@@ -161,6 +192,27 @@ fn field_id(intent: &WriteIntent, key: &str) -> Result<SnowflakeId, StoreError> 
         .parse()
         .map_err(|_| StoreError::ConstraintViolation)?;
     Ok(SnowflakeId::from_raw(raw))
+}
+
+/// 取一个可空字符串字段：缺 / JSON null ⇒ `None`；存在且为字符串 ⇒ `Some`；存在但非字符串
+/// （类型错）⇒ `ConstraintViolation`（fail-closed，绝不静默当缺省）。
+fn field_str_opt<'a>(intent: &'a WriteIntent, key: &str) -> Result<Option<&'a str>, StoreError> {
+    match intent.fields.get(key) {
+        None => Ok(None),
+        Some(v) if v.is_null() => Ok(None),
+        Some(v) => v.as_str().map(Some).ok_or(StoreError::ConstraintViolation),
+    }
+}
+
+/// 取一个可空雪花 id 字段：缺 / null ⇒ `None`；存在 ⇒ 解析（非法十进制 ⇒ `ConstraintViolation`）。
+fn field_id_opt(intent: &WriteIntent, key: &str) -> Result<Option<SnowflakeId>, StoreError> {
+    match field_str_opt(intent, key)? {
+        None => Ok(None),
+        Some(s) => {
+            let raw: u64 = s.parse().map_err(|_| StoreError::ConstraintViolation)?;
+            Ok(Some(SnowflakeId::from_raw(raw)))
+        }
+    }
 }
 
 /// principals 写解构：把 `intent.fields`（principal DTO 序列化）解构为 create / rename 调用。
@@ -220,6 +272,148 @@ fn commit_binding(
     let principal_id = field_id(intent, "principal_id")?;
     let role_id = field_id(intent, "role_id")?;
     inner.create_binding_and_rebuild(actor, principal_id, role_id)
+}
+
+/// constraints 写解构：`None` ⇒ 新增（`resource_id`/`capability`/`kind`/可空 `spec`）；
+/// `Some(v)` ⇒ 乐观锁逻辑删除（`id`，期望版本 `v`）。
+fn commit_constraint(
+    inner: &StorePolicyRepo,
+    actor: &StoreActor,
+    intent: &WriteIntent,
+) -> Result<(i64, u64), StoreError> {
+    match intent.expected_version {
+        None => {
+            let resource_id = field_id(intent, "resource_id")?;
+            let capability = field_str(intent, "capability")?;
+            let kind = field_str(intent, "kind")?;
+            let spec = field_str_opt(intent, "spec")?;
+            inner.create_constraint_and_rebuild(actor, resource_id, capability, kind, spec)
+        }
+        Some(expected) => {
+            let id = field_id(intent, "id")?;
+            inner.delete_constraint_and_rebuild(actor, id, expected)
+        }
+    }
+}
+
+/// conditions 写解构：`None` ⇒ 新增（可空 `resource_id`/`capability`、必填 `predicate`、可空
+/// `spec`）；`Some(v)` ⇒ 乐观锁逻辑删除（`id`，期望版本 `v`）。
+fn commit_condition(
+    inner: &StorePolicyRepo,
+    actor: &StoreActor,
+    intent: &WriteIntent,
+) -> Result<(i64, u64), StoreError> {
+    match intent.expected_version {
+        None => {
+            let resource_id = field_id_opt(intent, "resource_id")?;
+            let capability = field_str_opt(intent, "capability")?;
+            let predicate = field_str(intent, "predicate")?;
+            let spec = field_str_opt(intent, "spec")?;
+            inner.create_condition_and_rebuild(actor, resource_id, capability, predicate, spec)
+        }
+        Some(expected) => {
+            let id = field_id(intent, "id")?;
+            inner.delete_condition_and_rebuild(actor, id, expected)
+        }
+    }
+}
+
+/// deny-notes 写解构：`None` ⇒ 新增（`resource_id`/`capability`/`note`）；`Some(v)` ⇒ 乐观锁
+/// 逻辑删除（`id`，期望版本 `v`）。
+fn commit_deny_note(
+    inner: &StorePolicyRepo,
+    actor: &StoreActor,
+    intent: &WriteIntent,
+) -> Result<(i64, u64), StoreError> {
+    match intent.expected_version {
+        None => {
+            let resource_id = field_id(intent, "resource_id")?;
+            let capability = field_str(intent, "capability")?;
+            let note = field_str(intent, "note")?;
+            inner.create_deny_note_and_rebuild(actor, resource_id, capability, note)
+        }
+        Some(expected) => {
+            let id = field_id(intent, "id")?;
+            inner.delete_deny_note_and_rebuild(actor, id, expected)
+        }
+    }
+}
+
+/// mode 写解构（**upsert** by 辖区）：`scope`（可空雪花 id = 全局）/ `mode` / 可空 `expires_at`
+/// → `set_mode_and_rebuild`。store 内按辖区哨兵决定 insert vs update（version 自增），故本处
+/// **不**按 `expected_version` 分流——upsert 语义由 store 承载，期望版本不在本写参数里。
+fn commit_mode(
+    inner: &StorePolicyRepo,
+    actor: &StoreActor,
+    intent: &WriteIntent,
+) -> Result<(i64, u64), StoreError> {
+    let scope_resource_id = field_id_opt(intent, "scope")?;
+    let mode = field_str(intent, "mode")?;
+    let expires_at = field_str_opt(intent, "expires_at")?;
+    inner.set_mode_and_rebuild(actor, scope_resource_id, mode, expires_at)
+}
+
+/// settings 写解构（**upsert** by key）：`key` / `value` → `set_setting_and_rebuild`。store 内
+/// 按 key 决定 insert vs update（version 自增），故本处不按 `expected_version` 分流。
+fn commit_setting(
+    inner: &StorePolicyRepo,
+    actor: &StoreActor,
+    intent: &WriteIntent,
+) -> Result<(i64, u64), StoreError> {
+    let key = field_str(intent, "key")?;
+    let value = field_str(intent, "value")?;
+    inner.set_setting_and_rebuild(actor, key, value)
+}
+
+/// grants 写解构（按 `op` 判别）：`elevate` ⇒ 新增临时授权（`principal` 为雪花 id 字符串、
+/// `resource` 为资源**代号**、`capability`、正 `ttl_ms`）→ `elevate_grant_and_rebuild`；
+/// `revoke` ⇒ 乐观锁撤销（`id`，期望版本 `expected_version`）→ `revoke_grant_and_rebuild`。
+///
+/// **`resource` 是资源代号（非雪花 id）**：`ElevateRequest.resource` 文档恒为代号（如
+/// `db-main`）。store `elevate_grant_and_rebuild` 形参要求 `resource_id` 为 [`SnowflakeId`]，
+/// 故此处经 store [`resource_id_by_code`](StorePolicyRepo::resource_id_by_code) 反查代号 → id；
+/// 未命中（无此代号 / 已删 / 已停用）⇒ [`WriteError::ResourceNotFound`]（fail-closed，404，绝不
+/// 臆造资源 / 误折为 500）。`principal` 仍为雪花 id 字符串（`field_id`）。`ttl_ms` 非正 / 缺、
+/// `op` 未知 / 缺、字段缺失等解构失败一律折为 [`WriteError::Transaction`]（事务级失败，绝不放行
+/// 半态写）。store 写错误经 [`to_write_error`] 映射（乐观锁冲突 ⇒ `VersionConflict`）。
+fn commit_grant(
+    inner: &StorePolicyRepo,
+    actor: &StoreActor,
+    intent: &WriteIntent,
+) -> Result<(i64, u64), WriteError> {
+    let op = field_str(intent, "op").map_err(to_write_error)?;
+    match op {
+        "elevate" => {
+            let principal_id = field_id(intent, "principal").map_err(to_write_error)?;
+            // resource 是资源代号（恒为代号）：经 store 只读反查代号 → 资源 id；未命中即 404
+            // （ResourceNotFound），区别于真实事务失败（绝不误折为 500）。
+            let code = field_str(intent, "resource").map_err(to_write_error)?;
+            let resource_id = inner
+                .resource_id_by_code(code)
+                .map_err(to_write_error)?
+                .ok_or(WriteError::ResourceNotFound)?;
+            let capability = field_str(intent, "capability").map_err(to_write_error)?;
+            let ttl_ms = intent
+                .fields
+                .get("ttl_ms")
+                .and_then(|v| v.as_i64())
+                .filter(|ttl| *ttl > 0)
+                .ok_or(WriteError::Transaction)? as u64;
+            inner
+                .elevate_grant_and_rebuild(actor, principal_id, resource_id, capability, ttl_ms)
+                .map_err(to_write_error)
+        }
+        "revoke" => {
+            let id = field_id(intent, "id").map_err(to_write_error)?;
+            // 撤销既有行：走乐观锁（期望版本必传，缺即 fail-closed）。
+            let expected = intent.expected_version.ok_or(WriteError::Transaction)?;
+            inner
+                .revoke_grant_and_rebuild(actor, id, expected)
+                .map_err(to_write_error)
+        }
+        // 未知 / 缺 op：端点固定，理应恒命中；兜底 fail-closed。
+        _ => Err(WriteError::Transaction),
+    }
 }
 
 // ──────────────────────────────────────────── per-entity 读投影（store row → serde_json::Value）
@@ -290,14 +484,107 @@ fn list_resources(
     })
 }
 
-/// bindings 列读：store 只暴露 `list_bindings_of(principal_id, page)`（绑定按主体过滤），**无**
-/// 全量 bindings 列读 API——无主体过滤的 `list("bindings")` 在 store 侧无对应能力，故如实回
-/// `NotImplemented`（端点据此回 501 + 稳定码，能力未接通），**绝不**伪造空信封、**绝不**折叠为
-/// Boot（端点会映成 500，与真实内部失败不可区分）。按主体过滤的绑定读由 bindings 域专用端点
-/// 承接（store `list_bindings_of`，后续波次）。
+/// bindings 列读（全量）：store `list_bindings` → `Page<serde_json::Value>`（id /
+/// `principal_id` / `role_id` 一律雪花字符串）。
 fn list_bindings(
-    _inner: &StorePolicyRepo,
-    _page: PageQuery,
+    inner: &StorePolicyRepo,
+    page: PageQuery,
 ) -> Result<Page<serde_json::Value>, DaemonError> {
-    Err(DaemonError::NotImplemented)
+    project_page(inner.list_bindings(page), |row| BindingDto {
+        id: row.id.as_raw().to_string(),
+        principal_id: row.principal_id.as_raw().to_string(),
+        role_id: row.role_id.as_raw().to_string(),
+        version: row.version,
+    })
+}
+
+/// constraints 列读：store `list_constraints` → `Page`（`resource_id` 投影为雪花字符串；
+/// 恒 id、绝非真实地址）。
+fn list_constraints(
+    inner: &StorePolicyRepo,
+    page: PageQuery,
+) -> Result<Page<serde_json::Value>, DaemonError> {
+    project_page(inner.list_constraints(page), |row| ConstraintDto {
+        id: row.id.as_raw().to_string(),
+        resource: row.resource_id.as_raw().to_string(),
+        capability: row.capability,
+        kind: row.kind,
+        spec: row.spec,
+        version: row.version,
+    })
+}
+
+/// conditions 列读：store `list_conditions` → `Page`（可空 `resource_id`/`capability` 如实投影，
+/// 资源 id 字符串化）。
+fn list_conditions(
+    inner: &StorePolicyRepo,
+    page: PageQuery,
+) -> Result<Page<serde_json::Value>, DaemonError> {
+    project_page(inner.list_conditions(page), |row| ConditionDto {
+        id: row.id.as_raw().to_string(),
+        resource: row.resource_id.map(|r| r.as_raw().to_string()),
+        capability: row.capability,
+        predicate: row.predicate,
+        spec: row.spec,
+        version: row.version,
+    })
+}
+
+/// deny-notes 列读：store `list_deny_notes` → `Page`（`resource_id` 投影为雪花字符串）。
+fn list_deny_notes(
+    inner: &StorePolicyRepo,
+    page: PageQuery,
+) -> Result<Page<serde_json::Value>, DaemonError> {
+    project_page(inner.list_deny_notes(page), |row| DenyNoteDto {
+        id: row.id.as_raw().to_string(),
+        resource: row.resource_id.as_raw().to_string(),
+        capability: row.capability,
+        note: row.note,
+        version: row.version,
+    })
+}
+
+/// settings 列读：store `list_settings` → `Page`（`key`/`value`/`version`；元数据由 daemon 定义）。
+fn list_settings(
+    inner: &StorePolicyRepo,
+    page: PageQuery,
+) -> Result<Page<serde_json::Value>, DaemonError> {
+    project_page(inner.list_settings(page), |row| SettingDto {
+        key: row.key,
+        value: row.value,
+        version: row.version,
+    })
+}
+
+/// mode 列读：store `list_mode_state` → `Page`（`scope` 投影为辖区资源雪花字符串，`None` = 全局）。
+fn list_mode(
+    inner: &StorePolicyRepo,
+    page: PageQuery,
+) -> Result<Page<serde_json::Value>, DaemonError> {
+    project_page(inner.list_mode_state(page), |row| ModeRowDto {
+        id: row.id.as_raw().to_string(),
+        scope: row.scope_resource_id.map(|r| r.as_raw().to_string()),
+        mode: row.mode,
+        expires_at: row.expires_at,
+        version: row.version,
+    })
+}
+
+/// grants 列读：store `list_temp_grants` → `Page`（`principal`/`resource` 投影为雪花字符串；
+/// 终态字段如实出线）。
+fn list_grants(
+    inner: &StorePolicyRepo,
+    page: PageQuery,
+) -> Result<Page<serde_json::Value>, DaemonError> {
+    project_page(inner.list_temp_grants(page), |row| TempGrantDto {
+        id: row.id.as_raw().to_string(),
+        principal: row.principal_id.as_raw().to_string(),
+        resource: row.resource_id.as_raw().to_string(),
+        capability: row.capability,
+        granted_at: row.granted_at,
+        expires_at: row.expires_at,
+        ended_at: row.ended_at,
+        end_reason: row.end_reason,
+        version: row.version,
+    })
 }

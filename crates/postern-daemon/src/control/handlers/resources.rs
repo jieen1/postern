@@ -134,6 +134,15 @@ fn write_response(outcome: WriteHttp) -> Response {
             )),
         )
             .into_response(),
+        // 资源代号不存在（resources 写新增资源、不反查代号，理应不命中；穷尽匹配）⇒ 404。
+        WriteHttp::NotFound => (
+            StatusCode::NOT_FOUND,
+            Json(ApiErrorBody::new(
+                "not_found",
+                "referenced resource not found",
+            )),
+        )
+            .into_response(),
         WriteHttp::Failed => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ApiErrorBody::new(

@@ -111,6 +111,14 @@ path = "tests/d1_uid_probe.rs"
 name = "d2b-repo"
 path = "tests/d2b_repo.rs"
 
+# D2b-ext 写接缝 — StorePolicyRepoAdapter 全实体接通：constraints/conditions/deny-notes/mode/
+# grants/settings 各 commit_write→rev 前进 + list 投影 id-string；mode/settings upsert；grants
+# elevate/revoke；bindings 全量列读；audit/denials 经真实 JsonlAuditReader 投影（不构造 ConnOrigin、
+# 不泄露真实地址）；VersionConflict 全或无。store 写 / 快照 / JSONL 审计无 argon2，可直接 -p 跑。
+[[test]]
+name = "d2bx-adapter"
+path = "tests/d2bx_adapter.rs"
+
 # D2b 控制面 handler — in-process router oneshot：读 200+items 信封、写 200+WriteAck(rev 前进)、
 # stale→409、凭据 POST 明确「D2c 未启用」501（凭据 handler 即绿，读写 handler unimplemented→500 故红）。
 [[test]]

@@ -102,9 +102,11 @@ impl PolicyRepo for FakeRepo {
                     "version": 5, "updated_at": "1700000500000", "updated_by": "op-b",
                 }),
             ],
-            // temp_grants 行（id 雪花 i64；resource 代号；capability；时窗）。
+            // temp_grants 行（id 雪花已字符串化：repo/adapter 是唯一 i64→string 投影点，
+            // handler project_temp_grants 如实读字符串，绝不二次投影——故 fake repo 比照真实
+            // StorePolicyRepoAdapter::list_grants 出线字符串 id；resource 代号；capability；时窗）。
             "grants" => vec![serde_json::json!({
-                "id": 7000000000000000001_i64,
+                "id": "7000000000000000001",
                 "resource": "db-main", "capability": "mutate",
                 "granted_at": "1700000000000", "expires_at": "1700003600000",
                 "ended_at": null, "end_reason": null, "version": 0,

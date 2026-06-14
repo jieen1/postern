@@ -267,3 +267,33 @@ async fn post_principals_stale_version_returns_409() {
         "乐观锁版本冲突 ⇒ 409 Conflict（F-6 / L-15）"
     );
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+//  关停端点：已真实挂载 ⇒ 绝不 panic（CatchPanic 折成 500）——干净 501 / 或真实 200
+// ════════════════════════════════════════════════════════════════════════════
+
+/// `POST /v1/shutdown`：该路由在 router.rs 被**真实挂载**（CONTROL_ROUTES、`post(misc::shutdown)`），
+/// `app()` 经 `CatchPanicLayer` front（镜像生产 serve.rs）——故命中该端点**绝不**得 500。
+///
+/// 此前 handler 体为 `unimplemented!()`，命中即 panic→被 CatchPanic 折成不可区分的 500（落在
+/// 本波次「所有控制端点真 200 或干净 501」验收面外）。修后与 `list_credentials` / 写接缝未接通族
+/// 同一纪律，如实回干净 501（能力未接通）——本测试钉死它**不再 panic**（非 500，且确为干净 501）。
+#[tokio::test]
+async fn post_shutdown_is_clean_not_500_panic() {
+    let resp = ok_app()
+        .oneshot(req("POST", "/v1/shutdown", axum::body::Body::empty()))
+        .await
+        .expect("router serves");
+    // 核心断言：已挂载、可达的 shutdown 端点绝不 panic→500（CatchPanic 折叠面）。
+    assert_ne!(
+        resp.status(),
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        "POST /v1/shutdown 已真实挂载：绝不得 panic 折成的 500（钉死不再 unimplemented!()）"
+    );
+    // 关停语义未接通 ⇒ 干净 501 + 稳定机读码（能力未接通族，与 list_credentials 同纪律）。
+    assert_eq!(
+        resp.status(),
+        axum::http::StatusCode::NOT_IMPLEMENTED,
+        "关停语义未接通 ⇒ 干净 501（非 500、非伪造 200）"
+    );
+}

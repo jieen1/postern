@@ -1212,6 +1212,48 @@ fn list_resources_reflects_persisted_business_columns() {
 }
 
 #[test]
+fn resource_id_by_code_resolves_active_resource_and_normalizes() {
+    // 资源代号反查（elevate 经此把 ElevateRequest.resource 代号 → 资源 id）：命中活跃资源；
+    // 入参经与入库一致的归一化（trim + 小写）后比对，故 " DB-Main " 命中 "db-main"。
+    let repo = repo_at(EPOCH_UNIX_MS);
+    let id = repo
+        .create_resource(&operator("alice"), "db-main", "postgres", "tcp")
+        .expect("resource");
+
+    assert_eq!(
+        repo.resource_id_by_code("db-main").expect("lookup"),
+        Some(id),
+        "精确代号命中活跃资源 id"
+    );
+    assert_eq!(
+        repo.resource_id_by_code(" DB-Main ").expect("lookup"),
+        Some(id),
+        "代号归一化（trim + 小写）与入库一致 ⇒ 命中同一资源"
+    );
+    assert_eq!(
+        repo.resource_id_by_code("nope").expect("lookup"),
+        None,
+        "未知代号 ⇒ None（调用方 fail-closed，绝不臆造资源）"
+    );
+}
+
+#[test]
+fn resource_id_by_code_excludes_deleted_resource() {
+    // §3.1 默认作用域：逻辑删除的资源不应被代号反查命中（None）——避免对已删资源发临时授权。
+    let repo = repo_at(EPOCH_UNIX_MS);
+    let id = repo
+        .create_resource(&operator("alice"), "db-main", "postgres", "tcp")
+        .expect("resource");
+    repo.delete_resource(&operator("alice"), id, 0)
+        .expect("delete resource");
+    assert_eq!(
+        repo.resource_id_by_code("db-main").expect("lookup"),
+        None,
+        "已逻辑删除的资源代号反查 ⇒ None（默认作用域排除已删）"
+    );
+}
+
+#[test]
 fn list_bindings_of_filters_by_principal_and_excludes_deleted() {
     // §8-一F-5：列某主体的绑定——只含该主体且默认排除已删。
     let repo = repo_at(EPOCH_UNIX_MS);
