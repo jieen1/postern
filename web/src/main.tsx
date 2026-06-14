@@ -4,13 +4,16 @@ import { App } from './app/App';
 import './styles/index.css';
 
 /**
- * Entry. In dev (and unless VITE_ENABLE_MSW=false) MSW intercepts /v1/* so the
- * SPA runs with no daemon. The worker is started before the first render so no
- * request escapes the mock.
+ * Entry. MSW intercepts /v1/* only in the `mock` form factor (VITE_TARGET, with
+ * DEV defaulting to `mock`) so the SPA runs with no daemon; `web`/`tauri` builds
+ * hit a real transport. The worker is started before the first render so no
+ * request escapes the mock. VITE_ENABLE_MSW=false stays the explicit escape hatch.
  */
 async function enableMocking() {
+  const target =
+    import.meta.env.VITE_TARGET ?? (import.meta.env.DEV ? 'mock' : 'web');
   const enabled =
-    import.meta.env.DEV && import.meta.env.VITE_ENABLE_MSW !== 'false';
+    target === 'mock' && import.meta.env.VITE_ENABLE_MSW !== 'false';
   if (!enabled) return;
   const { worker } = await import('./mocks/browser');
   await worker.start({ onUnhandledRequest: 'bypass' });

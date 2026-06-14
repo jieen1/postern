@@ -18,6 +18,7 @@ import {
   type ApiErrorBody,
   type PageQuery,
 } from './types';
+import { selectTransport } from './transport';
 
 export const API_BASE = '/v1';
 
@@ -50,8 +51,7 @@ function isErrorBody(value: unknown): value is ApiErrorBody {
   );
 }
 
-async function parseBody(res: Response): Promise<unknown> {
-  const text = await res.text();
+function parseBody(text: string): unknown {
   if (text.length === 0) return undefined;
   // Parsed with the default reviver — id fields are already JSON strings in the
   // contract, so they stay strings; we never coerce them to Number.
@@ -63,23 +63,24 @@ async function request<T>(
   path: string,
   body?: unknown,
 ): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method,
-    headers: body === undefined ? undefined : { 'content-type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  const r = await selectTransport().send(method, path, body);
 
-  if (!res.ok) {
-    const parsed = await parseBody(res).catch(() => undefined);
-    const code = isErrorBody(parsed) ? parsed.error.code : `http_${res.status}`;
+  if (!r.ok) {
+    let parsed: unknown;
+    try {
+      parsed = parseBody(r.text);
+    } catch {
+      parsed = undefined;
+    }
+    const code = isErrorBody(parsed) ? parsed.error.code : `http_${r.status}`;
     const message = isErrorBody(parsed)
       ? parsed.error.message
-      : `请求失败 (${res.status})`;
-    if (res.status === 409) throw new ConflictError(code, message);
-    throw new ApiError(res.status, code, message);
+      : `请求失败 (${r.status})`;
+    if (r.status === 409) throw new ConflictError(code, message);
+    throw new ApiError(r.status, code, message);
   }
 
-  return (await parseBody(res)) as T;
+  return parseBody(r.text) as T;
 }
 
 /** Clamp pagination to the legal range (mirrors postern-core PageQuery::clamp). */
