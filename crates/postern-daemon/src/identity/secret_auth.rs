@@ -107,10 +107,7 @@ impl Authenticator for SecretAuthenticator {
                 continue;
             };
             // argon2id verify（常量时间口令比对，参数取自 stored PHC 串自身）。
-            if verifier
-                .verify_password(presented_secret, &parsed)
-                .is_err()
-            {
+            if verifier.verify_password(presented_secret, &parsed).is_err() {
                 continue;
             }
             // verify 通过：按 now 墙钟二次校验时效（过期/吊销即刻失效）。

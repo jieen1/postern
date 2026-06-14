@@ -428,10 +428,7 @@ fn local_process_expired_credential_is_denied_at_now() {
 fn local_process_multi_candidate_selects_first_match_deterministically() {
     let auth = LocalProcessAuthenticator;
     // 两条都匹配 uid=1000 的候选；按固定顺序取首个 → principal 30。
-    let creds = view(vec![
-        local_meta(30, "uid=1000"),
-        local_meta(31, "uid=1000"),
-    ]);
+    let creds = view(vec![local_meta(30, "uid=1000"), local_meta(31, "uid=1000")]);
 
     let got = auth
         .authenticate(

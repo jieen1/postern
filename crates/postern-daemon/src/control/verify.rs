@@ -153,7 +153,12 @@ fn json_string(s: &str) -> String {
 }
 
 /// 据语料 + 上下文构造一条归一化请求（presented 凭据 + 观测来源 + 资源代号 + 语句负载）。
-fn request(ctx: &ProbeContext, origin: Origin, resource: ResourceCode, statement: &str) -> NormalizedRequest {
+fn request(
+    ctx: &ProbeContext,
+    origin: Origin,
+    resource: ResourceCode,
+    statement: &str,
+) -> NormalizedRequest {
     NormalizedRequest {
         presented: PresentedCredential::new(ctx.auth_kind.clone(), ctx.presented_secret.clone()),
         origin,
@@ -175,56 +180,107 @@ fn probe_set(ctx: &ProbeContext, corpus: &VerifyCorpus, forbidden: &[String]) ->
         Probe {
             name: "scope_out_mutate",
             expect: Expect::DenyAt(Stage::Rbac),
-            request: request(ctx, ctx.trusted_origin.clone(), ctx.resource.clone(), &corpus.scope_out_mutate),
+            request: request(
+                ctx,
+                ctx.trusted_origin.clone(),
+                ctx.resource.clone(),
+                &corpus.scope_out_mutate,
+            ),
         },
         // ② 伪装写：只读外壳包裹的写删 → 穿透归 Destroy → (resource, Destroy) 缺格 → rbac。
         Probe {
             name: "disguised_write",
             expect: Expect::DenyAt(Stage::Rbac),
-            request: request(ctx, ctx.trusted_origin.clone(), ctx.resource.clone(), &corpus.disguised_write),
+            request: request(
+                ctx,
+                ctx.trusted_origin.clone(),
+                ctx.resource.clone(),
+                &corpus.disguised_write,
+            ),
         },
         // ③ 会话语义篡改：改会话状态的语句 → 归类层无放行口 → classify。
         Probe {
             name: "session_tamper",
             expect: Expect::DenyAt(Stage::Classify),
-            request: request(ctx, ctx.trusted_origin.clone(), ctx.resource.clone(), &corpus.session_tamper),
+            request: request(
+                ctx,
+                ctx.trusted_origin.clone(),
+                ctx.resource.clone(),
+                &corpus.session_tamper,
+            ),
         },
         // ④ 多语句：一条负载塞多条语句 → 归类层拒（绝不取首句放行）→ classify。
         Probe {
             name: "multi_statement",
             expect: Expect::DenyAt(Stage::Classify),
-            request: request(ctx, ctx.trusted_origin.clone(), ctx.resource.clone(), &corpus.multi_statement),
+            request: request(
+                ctx,
+                ctx.trusted_origin.clone(),
+                ctx.resource.clone(),
+                &corpus.multi_statement,
+            ),
         },
         // ⑤ 默认拒绝：对一个快照里根本不存在的资源代号打良性只读 → 缺格 → rbac，且不泄露存在性。
         Probe {
             name: "default_deny_unknown_resource",
-            expect: Expect::DenyNoExistenceLeak { absent: unknown.clone() },
-            request: request(ctx, ctx.trusted_origin.clone(), unknown.clone(), &corpus.benign_query),
+            expect: Expect::DenyNoExistenceLeak {
+                absent: unknown.clone(),
+            },
+            request: request(
+                ctx,
+                ctx.trusted_origin.clone(),
+                unknown.clone(),
+                &corpus.benign_query,
+            ),
         },
         // ⑥ 凭据零接触：取一条 deny（越权 mutate），其响应字节经 grep 不含真实地址 / 凭据明文。
         Probe {
             name: "credential_zero_touch",
-            expect: Expect::DenyNoSecretEcho { forbidden: forbidden.to_vec() },
-            request: request(ctx, ctx.trusted_origin.clone(), ctx.resource.clone(), &corpus.scope_out_mutate),
+            expect: Expect::DenyNoSecretEcho {
+                forbidden: forbidden.to_vec(),
+            },
+            request: request(
+                ctx,
+                ctx.trusted_origin.clone(),
+                ctx.resource.clone(),
+                &corpus.scope_out_mutate,
+            ),
         },
         // ⑦ ConnOrigin 自报不被采信：以一个**不被采信**的观测来源发起 → auth 阶拒（来源观测门，
         //    网关据观测 origin 裁定，绝不采信请求自报字段，公理三）。
         Probe {
             name: "origin_not_trusted",
             expect: Expect::OriginNotTrusted,
-            request: request(ctx, ctx.untrusted_origin.clone(), ctx.resource.clone(), &corpus.benign_query),
+            request: request(
+                ctx,
+                ctx.untrusted_origin.clone(),
+                ctx.resource.clone(),
+                &corpus.benign_query,
+            ),
         },
         // ⑧ 临时低权 secret 在错误来源被拒：与 ⑦ 同一观测门的另一面——auth 阶拒（落 auth stage）。
         Probe {
             name: "untrusted_origin_auth_stage",
             expect: Expect::DenyAt(Stage::Auth),
-            request: request(ctx, ctx.untrusted_origin.clone(), ctx.resource.clone(), &corpus.scope_out_mutate),
+            request: request(
+                ctx,
+                ctx.untrusted_origin.clone(),
+                ctx.resource.clone(),
+                &corpus.scope_out_mutate,
+            ),
         },
         // ⑨ 脱敏探测：对低权 principal authorized 的只读探针 → 放行，但响应无真实地址 / 凭据回显。
         Probe {
             name: "redaction_probe",
-            expect: Expect::AllowNoSecretEcho { forbidden: forbidden.to_vec() },
-            request: request(ctx, ctx.trusted_origin.clone(), ctx.resource.clone(), &corpus.benign_query),
+            expect: Expect::AllowNoSecretEcho {
+                forbidden: forbidden.to_vec(),
+            },
+            request: request(
+                ctx,
+                ctx.trusted_origin.clone(),
+                ctx.resource.clone(),
+                &corpus.benign_query,
+            ),
         },
     ]
 }
@@ -288,7 +344,10 @@ fn judge(
     let audited = !audit_tail.is_empty();
     match expect {
         Expect::DenyAt(stage) => match result {
-            Ok(_) => Some(format!("本应在 {} 阶被拒,实测却放行(防线漏放)", stage.as_str())),
+            Ok(_) => Some(format!(
+                "本应在 {} 阶被拒,实测却放行(防线漏放)",
+                stage.as_str()
+            )),
             Err(deny) => {
                 if !deny.reason.contains(stage.as_str()) {
                     return Some(format!(
@@ -297,7 +356,11 @@ fn judge(
                         deny.reason
                     ));
                 }
-                if !audited || !audit_tail.iter().any(|(d, s)| d == "deny" && *s == Some(*stage)) {
+                if !audited
+                    || !audit_tail
+                        .iter()
+                        .any(|(d, s)| d == "deny" && *s == Some(*stage))
+                {
                     return Some(format!(
                         "{} 阶 deny 未逐条留痕(审计缺该项,详设 6.7 留痕可复核)",
                         stage.as_str()
@@ -316,7 +379,9 @@ fn judge(
                     ));
                 }
                 if deny.request_hint_some {
-                    return Some("拒绝响应 request_hint 暗示了被探测资源的可授性(泄露存在性)".to_string());
+                    return Some(
+                        "拒绝响应 request_hint 暗示了被探测资源的可授性(泄露存在性)".to_string(),
+                    );
                 }
                 if !audited {
                     return Some("默认拒绝未逐条留痕(审计缺该项)".to_string());
@@ -344,7 +409,11 @@ fn judge(
                         deny.reason
                     ));
                 }
-                if !audited || !audit_tail.iter().any(|(d, s)| d == "deny" && *s == Some(Stage::Auth)) {
+                if !audited
+                    || !audit_tail
+                        .iter()
+                        .any(|(d, s)| d == "deny" && *s == Some(Stage::Auth))
+                {
                     return Some("来源观测门 deny 未逐条留痕(审计缺该项)".to_string());
                 }
                 None
@@ -393,7 +462,9 @@ struct DenyView {
 impl DenyView {
     /// your_grants 是否含指定资源代号（存在性泄露判据）。
     fn your_grants_has(&self, resource: &ResourceCode) -> bool {
-        self.your_grants_resources.iter().any(|r| r == resource.as_str())
+        self.your_grants_resources
+            .iter()
+            .any(|r| r == resource.as_str())
     }
 }
 

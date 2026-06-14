@@ -45,9 +45,7 @@ use postern_core::error::{ExecError, TransportError};
 use postern_core::eval::evaluator::Evaluator;
 use postern_core::id::SnowflakeId;
 use postern_core::plugin::sanitize::Sanitizer;
-use postern_core::plugin::{
-    Adapter, Authenticator, Channel, ConditionPredicate, RawResponse,
-};
+use postern_core::plugin::{Adapter, Authenticator, Channel, ConditionPredicate, RawResponse};
 // 测试在 shells 外：以别名构造请求来源，绝不写字面 ConnOrigin:: 变体（雷区）。
 use postern_core::request::ConnOrigin as Origin;
 use postern_core::request::{ClassifiedIntent, Intent};
@@ -108,7 +106,8 @@ struct CorpusFile {
 }
 
 fn corpus() -> VerifyCorpus {
-    let f: CorpusFile = serde_json::from_str(CORPUS_JSON).expect("verify_corpus/probes.json 可解析");
+    let f: CorpusFile =
+        serde_json::from_str(CORPUS_JSON).expect("verify_corpus/probes.json 可解析");
     VerifyCorpus {
         scope_out_mutate: f.scope_out_mutate,
         disguised_write: f.disguised_write,
@@ -344,7 +343,10 @@ fn tier_decls(carry_writes: bool) -> Vec<TierDecl> {
 fn seed_snapshot(extra_grants: &[Capability], carry_writes: bool) -> PolicySnapshot {
     let resource = ResourceCode::new(RESOURCE);
     let mut per_principal = BTreeMap::new();
-    per_principal.insert((resource.clone(), Capability::Query), allow_cell(Capability::Query));
+    per_principal.insert(
+        (resource.clone(), Capability::Query),
+        allow_cell(Capability::Query),
+    );
     for cap in extra_grants {
         per_principal.insert((resource.clone(), *cap), allow_cell(*cap));
     }
@@ -395,7 +397,9 @@ fn assemble(snapshot: PolicySnapshot) -> Harness {
         canned: canned_backend_bytes(),
     };
     assert_eq!(adapter.protocol(), PG_PROTOCOL, "适配器协议键须为 postgres");
-    let adapters = Arc::new(AdapterRegistry::new(vec![Box::new(adapter) as Box<dyn Adapter>]));
+    let adapters = Arc::new(AdapterRegistry::new(vec![
+        Box::new(adapter) as Box<dyn Adapter>
+    ]));
 
     let audit = Arc::new(VerifyAudit::new());
 
@@ -438,7 +442,10 @@ async fn run_with(snapshot: PolicySnapshot) -> VerifyReport {
 }
 
 /// 取报告里某项（按名）。
-fn item<'r>(report: &'r VerifyReport, name: &str) -> &'r postern_daemon::control::verify::VerifyItem {
+fn item<'r>(
+    report: &'r VerifyReport,
+    name: &str,
+) -> &'r postern_daemon::control::verify::VerifyItem {
     report
         .items
         .iter()
@@ -495,7 +502,11 @@ async fn correct_policy_makes_all_redteam_probes_pass() {
 async fn broken_defense_grants_overreach_makes_probe_fail() {
     // 防线被破：给低权 principal 额外授 (db-main, Mutate) + (db-main, Destroy) 格，且 tier 声明
     // 越权承载 mutate/destroy（tier 声明 ⊃ 账号真实权限）——本应被拒的越权写/伪装写现被放行。
-    let report = run_with(seed_snapshot(&[Capability::Mutate, Capability::Destroy], true)).await;
+    let report = run_with(seed_snapshot(
+        &[Capability::Mutate, Capability::Destroy],
+        true,
+    ))
+    .await;
 
     // 越权写探针 FAIL：本应在 rbac 阶被拒，实测放行（防线漏放）。
     let scope = item(&report, "scope_out_mutate");
@@ -591,7 +602,9 @@ async fn broken_egress_scrub_makes_redaction_probe_fail() {
         inner: PostgresAdapter,
         canned: canned_backend_bytes(),
     };
-    let adapters = Arc::new(AdapterRegistry::new(vec![Box::new(adapter) as Box<dyn Adapter>]));
+    let adapters = Arc::new(AdapterRegistry::new(vec![
+        Box::new(adapter) as Box<dyn Adapter>
+    ]));
     let audit = Arc::new(VerifyAudit::new());
     let kernel = Kernel::new(
         evaluator,
@@ -617,7 +630,10 @@ async fn broken_egress_scrub_makes_redaction_probe_fail() {
         redact
             .gap_note
             .as_ref()
-            .map(|n| n.contains("回显") && (n.contains(REAL_HOST) || n.contains(REAL_DB_USER) || n.contains(REAL_DB_PASSWORD)))
+            .map(|n| n.contains("回显")
+                && (n.contains(REAL_HOST)
+                    || n.contains(REAL_DB_USER)
+                    || n.contains(REAL_DB_PASSWORD)))
             .unwrap_or(false),
         "redaction_probe 的 gap_note 须指出回显了真实机密子串，实得：{:?}",
         redact.gap_note
@@ -679,7 +695,11 @@ async fn mount_verify_makes_route_reachable_and_returns_report() {
         axum::http::StatusCode::NOT_IMPLEMENTED,
         "mount_verify 后 /v1/verify 须由真实 handler 处理（非 501 占位）"
     );
-    assert_eq!(resp.status(), axum::http::StatusCode::OK, "verify 路由回 200 + 报告");
+    assert_eq!(
+        resp.status(),
+        axum::http::StatusCode::OK,
+        "verify 路由回 200 + 报告"
+    );
 
     // 回体是 VerifyReport 的 JSON（CLI / SPA 据此渲染逐条 PASS/FAIL + all_pass）。
     let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)

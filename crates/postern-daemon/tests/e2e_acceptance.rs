@@ -532,7 +532,9 @@ fn assemble_e2e() -> E2E {
     };
     // 登记键恒为 "postgres"（命中登记册唯一解释者）。
     assert_eq!(adapter.protocol(), PG_PROTOCOL, "适配器协议键须为 postgres");
-    let adapters = Arc::new(AdapterRegistry::new(vec![Box::new(adapter) as Box<dyn Adapter>]));
+    let adapters = Arc::new(AdapterRegistry::new(vec![
+        Box::new(adapter) as Box<dyn Adapter>
+    ]));
 
     // 真建连缝：走 secrets 真实凭据/地址解析。
     let acquire = Arc::new(RealishAcquire::new(vault.clone()));
@@ -717,8 +719,7 @@ async fn assertion_2_unauthorized_mutate_denies_at_rbac_with_scoped_grants() {
         "②(A) 求值器层 your_grants 恰一格（不枚举他人/全局）"
     );
     assert_eq!(
-        eval_deny.denied.resource,
-        db_main,
+        eval_deny.denied.resource, db_main,
         "②(A) 求值器层 denied.resource 为真实请求代号 db-main"
     );
 
