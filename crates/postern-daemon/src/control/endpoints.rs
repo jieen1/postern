@@ -49,6 +49,9 @@ pub enum WriteHttp {
     Committed(WriteOutcome),
     /// 乐观锁版本冲突 ⇒ HTTP 409 Conflict（+ `policy_change` 审计，由端点写入）。
     Conflict,
+    /// 该实体的写接缝尚未接通（store 侧无对应写路径）⇒ HTTP **501 Not Implemented** + 稳定码。
+    /// 刻意与 [`Failed`](WriteHttp::Failed)（500 内部失败）区分：明确未实现而非内部坏掉。
+    NotImplemented,
     /// 其余写失败（事务 / 快照重建 / 审计）⇒ 5xx；不 COMMIT、不重建，无半态。
     Failed,
 }
@@ -59,15 +62,18 @@ impl WriteHttp {
         match self {
             WriteHttp::Committed(_) => 200,
             WriteHttp::Conflict => 409,
+            WriteHttp::NotImplemented => 501,
             WriteHttp::Failed => 500,
         }
     }
 
-    /// 把 [`WriteError`] 折叠为 HTTP 写结果：`VersionConflict` ⇒ 409，其余 ⇒ 5xx（fail-closed）。
+    /// 把 [`WriteError`] 折叠为 HTTP 写结果：`VersionConflict` ⇒ 409，`NotImplemented` ⇒ 501，
+    /// 其余 ⇒ 5xx（fail-closed）。
     pub fn from_write_error(err: &WriteError) -> Self {
-        // 穷尽 per-variant，无 `_ =>` 兜底：乐观锁冲突 ⇒ 409；其余写失败 ⇒ 5xx（fail-closed）。
+        // 穷尽 per-variant，无 `_ =>` 兜底：乐观锁冲突 ⇒ 409；未接通 ⇒ 501；其余写失败 ⇒ 5xx。
         match err {
             WriteError::VersionConflict => WriteHttp::Conflict,
+            WriteError::NotImplemented => WriteHttp::NotImplemented,
             WriteError::Transaction => WriteHttp::Failed,
             WriteError::SnapshotRebuild => WriteHttp::Failed,
             WriteError::Audit => WriteHttp::Failed,
@@ -159,6 +165,9 @@ pub async fn write(
                 WriteHttp::Failed
             }
         }
+        // 「能力未接通」不是一次真实写尝试（store 侧无对应写路径）：绝不留 policy_change deny
+        // 痕（否则审计被未实现端点的探测污染），如实回 501（端点据此回稳定「未接通」码）。
+        Err(WriteError::NotImplemented) => WriteHttp::NotImplemented,
         Err(err) => {
             // 失败也留痕：policy_change 审计（deny 处置）。审计写本身失败不改判定
             // （已是失败路径，无半态可留）——失败映射恒据 commit 失败族。

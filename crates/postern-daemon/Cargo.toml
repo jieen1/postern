@@ -104,6 +104,25 @@ path = "tests/d1_socket_factory.rs"
 name = "d1-uid-probe"
 path = "tests/d1_uid_probe.rs"
 
+# D2b 写接缝 — control::PolicyRepo 适配器层：写→rev 前进、list 投影 id 为字符串、
+# VersionConflict→WriteError::VersionConflict 全或无（store *_and_rebuild 直驱即绿，适配器解构
+# unimplemented 故经 commit_write/list 的断言红）。store 写 / 快照无 argon2，可直接 -p 跑。
+[[test]]
+name = "d2b-repo"
+path = "tests/d2b_repo.rs"
+
+# D2b 控制面 handler — in-process router oneshot：读 200+items 信封、写 200+WriteAck(rev 前进)、
+# stale→409、凭据 POST 明确「D2c 未启用」501（凭据 handler 即绿，读写 handler unimplemented→500 故红）。
+[[test]]
+name = "d2b-handlers"
+path = "tests/d2b_handlers.rs"
+
+# D2b 控制面认证链 — control.sock 接入门：SO_PEERCRED uid 主门（peer 不符拒）+ control-token
+# 第二因子（缺/错 token 拒、对 token 放行），health 豁免 token 仍过 peer 门（§8 L-1）。
+[[test]]
+name = "d2b_auth"
+path = "tests/d2b_auth.rs"
+
 [dev-dependencies]
 postern-core = { path = "../postern-core" }
 postern-secrets = { path = "../postern-secrets" }

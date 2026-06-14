@@ -349,7 +349,20 @@ pub async fn run() -> u8 {
     let probe = real::RealUidProbe::new(cfg.data_sock.clone());
     // assembler 与 pre 共享首份快照 cell：装配链在 rebuild 之后调用 assemble_control_plane 时，
     // cell 内 view 已物化（关键架构缝：Bootstrap::run 只产元数据，live view 经共享 cell 暴露）。
-    let assembler = real::RealRouterAssembler::new(pre.snapshot_cell());
+    // 审计数据目录取 db 路径的父目录（数据落盘根）；缺父目录退化为当前目录（部署前置补齐）。
+    let audit_dir = cfg
+        .db_path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    // 控制面认证门状态（L-1）：自身 uid 经 SO_PEERCRED 取（与 probe 同来源），control-token 期望值
+    // 从 0600 token 文件读入——读不到（无 token 文件 / IO 失败）⇒ token=None ⇒ 凭据恒 false，
+    // 所有需 token 的控制端点 fail-closed 拒（缺凭据绝不放行）。
+    let self_uid = ConnectableUidProbe::self_uid(&probe);
+    let token = std::fs::read(&cfg.control_token_path).ok();
+    let control_auth = crate::control::auth::ControlAuth::new(self_uid, token);
+    let assembler =
+        real::RealRouterAssembler::new(pre.snapshot_cell(), pre.db_cell(), audit_dir, control_auth);
 
     // 把 live listener / router 输出 cell **在移入 Bootstrap 之前**克隆出来——Bootstrap::run 只
     // 产 BootReport 元数据（不带 live FD/router），这些共享 cell 在 create_*/assemble_* 成功后被

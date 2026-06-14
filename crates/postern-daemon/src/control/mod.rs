@@ -26,7 +26,10 @@
 
 pub mod approvals;
 pub mod auth;
+pub mod dto;
 pub mod endpoints;
+pub mod handlers;
+pub mod repo;
 pub mod router;
 pub mod verify;
 
@@ -95,6 +98,12 @@ pub enum WriteError {
     /// 三联动中的审计写失败 ⇒ 不 COMMIT、不重建，回 error。
     #[error("audit write failed")]
     Audit,
+    /// 该实体的写接缝在本波次尚未接通（store 侧无对应 `*_and_rebuild`，留待后续波次：
+    /// settings / mode / grants）。**刻意与 [`Transaction`](WriteError::Transaction)（真实事务
+    /// 失败）区分**：它是「明确未实现」而非「内部失败」，端点据此回 **501** + 稳定码（能力未
+    /// 接通），绝不伪装成 500 内部失败。fail-closed：未实现绝不静默成功 / 伪造写 ack。
+    #[error("write capability not implemented")]
+    NotImplemented,
 }
 
 /// 控制面策略事务读写句柄（**daemon 侧注入缝**）。

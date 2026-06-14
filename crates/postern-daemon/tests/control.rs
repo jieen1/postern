@@ -358,24 +358,25 @@ async fn control_router_assembles_with_control_state_only() {
     // 装配不 panic ⇒ §6.5 端点表无重复 path、全部唯一挂载（恰覆盖的运行期佐证）。
     let app = router(state(repo, audit));
 
-    // 经一条仍占位的已挂端点（GET /v1/principals）发请求：命中占位 handler（NOT_IMPLEMENTED
+    // 经一条仍占位的已挂端点（POST /v1/verify）发请求：命中占位 stub_handler（NOT_IMPLEMENTED
     // 501），而非 404——证明该端点确被路由表挂上（路由面真实可达，非空 router）。`/v1/health`
-    // 已接真实健康投影 handler（D1），故此处改用仍 501 的 /v1/principals 验「占位端点可达」。
+    // 已接真实健康投影 handler（D1）、principals/roles/... 等 D2b 已接 handler 骨架，故此处改用
+    // 仍由 stub_handler 占位 501 的 `/v1/verify`（mount_verify 覆盖接真前）验「占位端点可达」。
     let req = axum::http::Request::builder()
-        .method("GET")
-        .uri("/v1/principals")
+        .method("POST")
+        .uri("/v1/verify")
         .body(axum::body::Body::empty())
         .expect("request builds");
     let resp = app.oneshot(req).await.expect("router serves");
     assert_ne!(
         resp.status(),
         axum::http::StatusCode::NOT_FOUND,
-        "已挂端点 /v1/principals 须可达（非 404）——证明路由确被装配"
+        "已挂端点 POST /v1/verify 须可达（非 404）——证明路由确被装配"
     );
     assert_eq!(
         resp.status(),
         axum::http::StatusCode::NOT_IMPLEMENTED,
-        "占位 handler 回 501（缺口闭合后接真实处理器）"
+        "占位 stub_handler 回 501（mount_verify 覆盖接真前）"
     );
 }
 

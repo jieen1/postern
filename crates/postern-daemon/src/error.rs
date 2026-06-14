@@ -47,7 +47,22 @@ pub enum DaemonError {
     /// 出口脱敏阶段失败（净化器拒绝放行）。
     #[error("sanitize failed")]
     Sanitize,
+
+    /// 控制面端点指向的读/写能力在本波次尚未接通（store 侧无对应读模型 / 写接缝，留待
+    /// 后续波次：settings/audit/mode/grants/denials/全量 bindings 等）。**刻意与
+    /// [`Boot`](DaemonError::Boot)（真实内部失败）区分**：它是「明确未实现」而非「内部错误」，
+    /// 故端点据此回 **501 Not Implemented** + 稳定机读码 [`NOT_IMPLEMENTED_CODE`]
+    /// （镜像 credentials/discover 的「未启用」语义），绝不伪装成 500 内部失败（运维据 501
+    /// 知悉「能力未接通」而非「daemon 坏了」）。fail-closed：未实现绝不静默放行 / 伪造空信封。
+    #[error("control capability not implemented")]
+    NotImplemented,
 }
+
+/// 控制面「能力未接通」的稳定机读码（[`DaemonError::NotImplemented`] 经端点出线时携带）。
+///
+/// 运维 / SPA / CLI 据此把「能力尚未接通」与「内部失败（500）」「乐观锁冲突（409）」逐一区分；
+/// 与 `credentials_not_enabled` / `discover_not_enabled` 同一「未启用」族（稳定码、无机密）。
+pub const NOT_IMPLEMENTED_CODE: &str = "not_implemented";
 
 /// daemon 装配层 Result 别名。
 pub type Result<T> = std::result::Result<T, DaemonError>;

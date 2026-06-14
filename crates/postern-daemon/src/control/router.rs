@@ -18,6 +18,8 @@ use std::sync::Arc;
 use axum::routing::{get, post, MethodRouter};
 use axum::{Json, Router};
 
+use super::auth::{control_auth, ControlAuth};
+use super::handlers::{bindings, misc, mode_grants, principals, resources, roles};
 use super::verify::{VerifyReport, VerifyRunner};
 use super::ControlState;
 
@@ -82,12 +84,51 @@ pub fn router(state: ControlState) -> Router {
         // CONTROL_ROUTES 只含 GET / POST 两类动词（端点面是设计承诺，由 §6.5 表固定）；
         // 任何其它动词在端点表里不存在，fail-closed 跳过——绝不静默挂成可达端点。
         //
-        // `GET /v1/health` 已接真实健康投影 handler（D1：进程能 serve 控制面 health）——其余
-        // 29 路由仍占位 501（D2 接真实处理器）；只此一条改真，端点面"恰覆盖"不变。
+        // `GET /v1/health` 已接真实健康投影 handler（D1）。D2b：principals/roles/resources/
+        // bindings 四域读写 + credentials/constraints/conditions/deny-notes/settings/grants/
+        // mode/audit/denials/approvals/export/import/shutdown 接 handler 骨架（体 unimplemented!()，
+        // 路由面恰覆盖 §6.5 在运行期成立）。`/v1/verify` 仍挂占位 POST，由 mount_verify 覆盖接真；
+        // 端点表里不存在的动词 fail-closed 跳过（None），绝不静默挂成可达端点。
         let handler: Option<MethodRouter<ControlState>> = match (*method, *path) {
             ("GET", "/v1/health") => Some(get(health_handler)),
-            ("GET", _) => Some(get(stub_handler)),
-            ("POST", _) => Some(post(stub_handler)),
+            // ── principals / roles / resources / bindings（四域读写）──
+            ("GET", "/v1/principals") => Some(get(principals::list_principals)),
+            ("POST", "/v1/principals") => Some(post(principals::create_principal)),
+            ("GET", "/v1/roles") => Some(get(roles::list_roles)),
+            ("POST", "/v1/roles") => Some(post(roles::create_role)),
+            ("GET", "/v1/resources") => Some(get(resources::list_resources)),
+            ("POST", "/v1/resources") => Some(post(resources::create_resource)),
+            ("POST", "/v1/resources/{code}/discover") => Some(post(resources::discover_resource)),
+            ("GET", "/v1/bindings") => Some(get(bindings::list_bindings)),
+            ("POST", "/v1/bindings") => Some(post(bindings::create_binding)),
+            // ── 凭据（GET 列读 + POST 明确「D2c 未启用」）──
+            ("GET", "/v1/credentials") => Some(get(misc::list_credentials)),
+            ("POST", "/v1/credentials") => Some(post(misc::create_credential)),
+            // ── 细则 / 条件 / 拒绝备注 ──
+            ("GET", "/v1/constraints") => Some(get(misc::list_constraints)),
+            ("POST", "/v1/constraints") => Some(post(misc::create_constraint)),
+            ("GET", "/v1/conditions") => Some(get(misc::list_conditions)),
+            ("POST", "/v1/conditions") => Some(post(misc::create_condition)),
+            ("GET", "/v1/deny-notes") => Some(get(misc::list_deny_notes)),
+            ("POST", "/v1/deny-notes") => Some(post(misc::create_deny_note)),
+            // ── 设置 ──
+            ("GET", "/v1/settings") => Some(get(misc::list_settings)),
+            ("POST", "/v1/settings") => Some(post(misc::write_settings)),
+            // ── 临时授权 / 模式 / 授权视图 ──
+            ("POST", "/v1/grants/temp/elevate") => Some(post(mode_grants::elevate_grant)),
+            ("POST", "/v1/grants/temp/revoke") => Some(post(mode_grants::revoke_grant)),
+            ("POST", "/v1/mode") => Some(post(mode_grants::mode)),
+            ("GET", "/v1/grants") => Some(get(mode_grants::grants_view)),
+            // ── 审计 / 拒绝摘要 / 审批 ──
+            ("GET", "/v1/audit") => Some(get(misc::list_audit)),
+            ("GET", "/v1/denials/summary") => Some(get(misc::denials_summary)),
+            ("POST", "/v1/approvals") => Some(post(misc::approvals)),
+            // ── 导出 / 导入 / 校验（verify 占位，mount_verify 覆盖接真）/ 关停 ──
+            ("POST", "/v1/export") => Some(post(misc::export_policy)),
+            ("POST", "/v1/import") => Some(post(misc::import_policy)),
+            ("POST", "/v1/verify") => Some(post(stub_handler)),
+            ("POST", "/v1/shutdown") => Some(post(misc::shutdown)),
+            // 端点表里不存在的动词（理应不出现）：fail-closed 跳过，绝不静默挂成可达端点。
             _ => None,
         };
         if let Some(handler) = handler {
@@ -143,4 +184,15 @@ async fn verify_handler(
     axum::Extension(runner): axum::Extension<Arc<dyn VerifyRunner>>,
 ) -> Json<VerifyReport> {
     Json(runner.run().await)
+}
+
+/// 把控制面认证中间件（[`control_auth`]）front 到一个已装配的控制面 router 上（L-1）。
+///
+/// 经 axum `from_fn_with_state` 把认证门挂在**所有**控制端点之前：SO_PEERCRED uid 主门
+/// （即便同 uid 也比对）**再叠** control-token 第二因子（`GET /v1/health` 豁免 token 但仍过
+/// peer 门）。boot 在控制面 serve 装配期调用本函数；`ControlAuth` 持自身 uid + 期望 token
+/// （无 token 文件 ⇒ token=None ⇒ 凭据恒 false，fail-closed）。本函数刻意与 [`router`] 分离，
+/// 使数据面 / in-process handler 测试可不挂认证门装配 router（认证为 serve 期接线，非路由本身）。
+pub fn with_control_auth(base: Router, auth: ControlAuth) -> Router {
+    base.layer(axum::middleware::from_fn_with_state(auth, control_auth))
 }

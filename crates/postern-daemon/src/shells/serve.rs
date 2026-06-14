@@ -18,7 +18,9 @@ use tokio::net::UnixListener;
 use tower::ServiceExt;
 use tower_http::catch_panic::CatchPanicLayer;
 
+use crate::control::auth::{operator_of_peer, PeerUid};
 use crate::error::Result;
+use crate::shells::listener::origin_of;
 
 /// 把 `router` 挂到已绑定的 `listener` 上 serve：accept 循环逐条接 UDS 连接、各自 spawn 处理。
 ///
@@ -50,6 +52,70 @@ pub async fn serve_router_over_uds(listener: UnixListener, router: axum::Router)
                 async move { router.oneshot(req).await }
             });
             // http1 单连接 serve；连接级 IO 错误（对端断开等）落本任务、不外泄到 accept 循环。
+            let _ = http1::Builder::new().serve_connection(io, service).await;
+        });
+    }
+}
+
+/// 把控制面 `router` 挂到 control.sock 的 `listener` 上 serve，**逐连接经 SO_PEERCRED 采集对端
+/// 来源并注入请求扩展链**（控制面专用，认证主门的来源事实在此采集，L-1 / B-2）。
+///
+/// 与 [`serve_router_over_uds`] 的唯一区别：每条连接 accept 后经
+/// [`origin_of`](crate::shells::listener::origin_of)（SO_PEERCRED 安全 API，唯一 `ConnOrigin`
+/// 构造点）取对端 `(uid,gid)`，把对端 uid 经 `Extension(PeerUid)`、来源经 `Extension(Origin)`
+/// 注入该连接每条请求的扩展集——控制面认证中间件（[`control_auth`](crate::control::auth::control_auth)）
+/// 据此 `PeerUid` 比对 `self_uid`（主门），审计端点据 `Origin` 留痕。`origin_of` 失败（无可信
+/// 来源事实）⇒ fail-closed 跳过本条连接（绝不在来源缺失时放行：无注入 ⇒ 中间件 peer 门必拒）。
+///
+/// router 在 serve 前已由 boot 装配期 front 认证中间件（[`with_control_auth`](crate::control::router::with_control_auth)）；
+/// 本函数只负责「每连接来源采集 + 注入」与 accept 循环，单连接 panic 经 [`CatchPanicLayer`] 收 500。
+pub async fn serve_control_router_over_uds(
+    listener: UnixListener,
+    router: axum::Router,
+) -> Result<()> {
+    // 全 router front 一层 CatchPanic（与数据面同纪律：单请求 handler panic → 500，不外泄）。
+    let router = router.layer(CatchPanicLayer::new());
+
+    loop {
+        // accept 一条 control.sock 连接（单条 accept 失败不拖垮监听循环，跳过续接下一条）。
+        let (stream, _addr) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(_) => continue,
+        };
+
+        // 唯一来源采集点：经 SO_PEERCRED 取对端来源事实（origin_of 在 shells/，合规构造）。
+        // 失败 ⇒ 无可信对端事实 ⇒ fail-closed 跳过本条连接（绝不放行无来源连接）。
+        let origin = match origin_of(&stream) {
+            Ok(o) => o,
+            Err(_) => continue,
+        };
+        // 从来源事实析出对端 uid（主门比对值）；control/ 的中间件只读此 u32、不持来源类型。
+        let peer_uid = match &origin {
+            postern_core::request::ConnOrigin::UnixPeer { uid, .. } => *uid,
+            // control.sock 是 UDS，理论上恒 UnixPeer；非 UnixPeer（不应发生）fail-closed 跳过。
+            _ => continue,
+        };
+        // 已认证操作者身份：由对端 SO_PEERCRED uid 派生（control.sock 0600 + uid 主门 + token，
+        // 故对端 uid 即「是谁在写」的可信标识）。注入 Extension(Actor) 让写 handler 据此填
+        // created_by/updated_by 审计字段（生产路径绝不再退化为空串 / 常量操作者）。
+        let actor = operator_of_peer(peer_uid);
+
+        let router = router.clone();
+        tokio::spawn(async move {
+            let io = TokioIo::new(stream);
+            let service = hyper::service::service_fn(move |mut req| {
+                let router = router.clone();
+                let origin = origin.clone();
+                let actor = actor.clone();
+                async move {
+                    // 把本连接对端 uid + 来源 + 已认证操作者经请求扩展注入 handler 链（认证中间件 /
+                    // 写 handler 审计支据此）。自报字段绝不被读取——注入值恒为 listener 采集者（B-2）。
+                    req.extensions_mut().insert(PeerUid(peer_uid));
+                    req.extensions_mut().insert(origin);
+                    req.extensions_mut().insert(actor);
+                    router.oneshot(req).await
+                }
+            });
             let _ = http1::Builder::new().serve_connection(io, service).await;
         });
     }

@@ -40,6 +40,9 @@ pub struct DaemonConfig {
     pub keyfile_path: PathBuf,
     /// control.sock 路径（`POSTERN_CONTROL_SOCK`，缺省 `<base>/control.sock`）。
     pub control_sock: PathBuf,
+    /// control-token 文件路径（`POSTERN_CONTROL_TOKEN`，缺省 `<base>/control.token`）。
+    /// 0600 随机凭据，控制面认证第二因子（L-1）：`init` 铸造、boot 读入、中间件比对。
+    pub control_token_path: PathBuf,
     /// data.sock 路径（`POSTERN_DATA_SOCK`，缺省 `<base>/data.sock`）。
     pub data_sock: PathBuf,
     /// data.sock 专用属组名（`POSTERN_DATA_GROUP`，缺省 `None`：不设专用组）。
@@ -64,6 +67,7 @@ impl DaemonConfig {
             vault_path: path_or_default("POSTERN_VAULT", "vault.postern"),
             keyfile_path: path_or_default("POSTERN_KEYFILE", "keyfile"),
             control_sock: path_or_default("POSTERN_CONTROL_SOCK", "control.sock"),
+            control_token_path: path_or_default("POSTERN_CONTROL_TOKEN", "control.token"),
             data_sock: path_or_default("POSTERN_DATA_SOCK", "data.sock"),
             data_sock_group: std::env::var("POSTERN_DATA_GROUP").ok(),
         }

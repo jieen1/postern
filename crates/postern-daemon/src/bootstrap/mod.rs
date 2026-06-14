@@ -63,8 +63,13 @@ fn random_master_key() -> [u8; 32] {
 /// `KeyFile::new` / `Payload::write_atomic`（secrets API 强制 `Zeroizing` 参数），故 GREEN 阶段
 /// 须把 `zeroize` 从 `[dev-dependencies]` 移入 `[dependencies]`（见 notes 上报）。
 pub fn init(cfg: &DaemonConfig) -> Result<()> {
-    // 1) 幂等拒绝覆盖：三个目标文件任一已存在 ⇒ fail-closed（绝不毁现有主密钥 / vault / db）。
-    if cfg.keyfile_path.exists() || cfg.vault_path.exists() || cfg.db_path.exists() {
+    // 1) 幂等拒绝覆盖：四个目标文件任一已存在 ⇒ fail-closed（绝不毁现有主密钥 / vault / db /
+    //    control-token）。control-token 一并纳入幂等门：重复 init 绝不重铸、不覆盖现有凭据。
+    if cfg.keyfile_path.exists()
+        || cfg.vault_path.exists()
+        || cfg.db_path.exists()
+        || cfg.control_token_path.exists()
+    {
         return Err(DaemonError::Boot);
     }
 
@@ -109,5 +114,34 @@ pub fn init(cfg: &DaemonConfig) -> Result<()> {
     let db = Db::open(&cfg.db_path).map_err(|_| DaemonError::Boot)?;
     migrate(&db).map_err(|_| DaemonError::Boot)?;
 
+    // 6) 铸 control-token：CSPRNG 取随机 32B、十六进制编码写入 0600 token 文件（控制面认证
+    //    第二因子，L-1）。create_new 保证不覆盖；boot 读入后由认证中间件与请求头比对。
+    write_control_token(&cfg.control_token_path)?;
+
+    Ok(())
+}
+
+/// 铸一个随机 control-token，十六进制编码写入 0600 文件（控制面认证第二因子，L-1）。
+///
+/// CSPRNG 取随机 32B（复用 [`random_master_key`] 的同一已审计 CSPRNG 路径，**不新增依赖**），
+/// 十六进制编码为 64 字符 ASCII（便于经 HTTP 头逐字节承载、无编码歧义），`create_new` 写入
+/// 权限恰 0600（仅属主可读写）。任一步失败 fail-closed 返 [`DaemonError::Boot`]。
+fn write_control_token(path: &std::path::Path) -> Result<()> {
+    let raw = Zeroizing::new(random_master_key());
+    // 十六进制编码（小写）：每字节两位 ASCII，无依赖。
+    let mut hex = String::with_capacity(raw.len() * 2);
+    for b in raw.iter() {
+        hex.push(char::from_digit(u32::from(b >> 4), 16).unwrap_or('0'));
+        hex.push(char::from_digit(u32::from(b & 0x0f), 16).unwrap_or('0'));
+    }
+    let mut tf = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|_| DaemonError::Boot)?;
+    tf.write_all(hex.as_bytes())
+        .map_err(|_| DaemonError::Boot)?;
+    tf.sync_all().map_err(|_| DaemonError::Boot)?;
     Ok(())
 }

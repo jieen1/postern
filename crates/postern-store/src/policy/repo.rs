@@ -179,6 +179,162 @@ impl PolicyRepo {
         )
     }
 
+    // ----------------------------------------------- per-entity 写 + 原子重建（D2b 写接缝）
+
+    // 以下 `*_and_rebuild` 是 D2b **写接缝的 store 侧**：把既有 per-entity `base::write`
+    // 调用塞进 [`commit_and_rebuild`](PolicyRepo::commit_and_rebuild) 的写闭包，使「实体写 +
+    // bump_policy_rev + COMMIT + build_snapshot + SnapshotView::replace」在同一写锁临界区内
+    // 原子完成（全或无：乐观锁冲突 / 任何 Err ⇒ 整体 ROLLBACK，rev 不进、快照不换）。返回
+    // `(new_version, new_rev)`——daemon control::PolicyRepo 适配器据此组装 `WriteOutcome`。
+    //
+    // 与既有 `create_*`/`delete_*`（各自 `with_write_txn`、**不**重建）并存：那些供仅需
+    // per-entity 写、不重建快照的既有调用点；控制面写端点的三联动一律经此 `*_and_rebuild`。
+    // DB 写一律经 `base::write`（契约 `DB_WRITE_PATH_CENTRALIZED`），本层零原始 SQL。
+    //
+    // version 语义：INSERT 落新行 `version = 0`（[`base::write::insert`] 固定），故新增类
+    // 返回 `0`；UPDATE / 逻辑删除恒 `version = version + 1`，故返回 `expected_version + 1`。
+
+    /// 新增主体 + 原子重建：在同一临界区内经 `base::write::insert` 落一行 principals、
+    /// bump rev、重建并发布快照。返回 `(新行 version=0, 新 rev)`。
+    pub fn create_principal_and_rebuild(
+        &self,
+        actor: &Actor,
+        name: &str,
+        kind: &str,
+    ) -> Result<(i64, u64), StoreError> {
+        let now = self.now();
+        self.commit_and_rebuild(|txn| {
+            write::insert(
+                txn,
+                &self.idgen,
+                now,
+                actor,
+                InsertRow {
+                    table: "principals",
+                    columns: vec!["name", "kind"],
+                    values: vec![Value::Text(name.to_string()), Value::Text(kind.to_string())],
+                    enable_flag: 1,
+                },
+            )?;
+            // INSERT 固定落 version = 0（base::write::insert）；新行版本即乐观锁下一期望前驱。
+            Ok(0)
+        })
+    }
+
+    /// 新增角色 + 原子重建。返回 `(新行 version=0, 新 rev)`。
+    pub fn create_role_and_rebuild(
+        &self,
+        actor: &Actor,
+        name: &str,
+        description: Option<&str>,
+    ) -> Result<(i64, u64), StoreError> {
+        let now = self.now();
+        let desc = match description {
+            Some(d) => Value::Text(d.to_string()),
+            None => Value::Null,
+        };
+        self.commit_and_rebuild(|txn| {
+            write::insert(
+                txn,
+                &self.idgen,
+                now,
+                actor,
+                InsertRow {
+                    table: "roles",
+                    columns: vec!["name", "description"],
+                    values: vec![Value::Text(name.to_string()), desc],
+                    enable_flag: 1,
+                },
+            )?;
+            Ok(0)
+        })
+    }
+
+    /// 新增资源 + 原子重建。返回 `(新行 version=0, 新 rev)`。
+    pub fn create_resource_and_rebuild(
+        &self,
+        actor: &Actor,
+        codename: &str,
+        adapter: &str,
+        transport: &str,
+    ) -> Result<(i64, u64), StoreError> {
+        let now = self.now();
+        self.commit_and_rebuild(|txn| {
+            write::insert(
+                txn,
+                &self.idgen,
+                now,
+                actor,
+                InsertRow {
+                    table: "resources",
+                    columns: vec!["codename", "adapter", "transport"],
+                    values: vec![
+                        Value::Text(codename.to_string()),
+                        Value::Text(adapter.to_string()),
+                        Value::Text(transport.to_string()),
+                    ],
+                    enable_flag: 1,
+                },
+            )?;
+            Ok(0)
+        })
+    }
+
+    /// 绑定主体到角色 + 原子重建。返回 `(新行 version=0, 新 rev)`。
+    pub fn create_binding_and_rebuild(
+        &self,
+        actor: &Actor,
+        principal_id: SnowflakeId,
+        role_id: SnowflakeId,
+    ) -> Result<(i64, u64), StoreError> {
+        let now = self.now();
+        self.commit_and_rebuild(|txn| {
+            write::insert(
+                txn,
+                &self.idgen,
+                now,
+                actor,
+                InsertRow {
+                    table: "bindings",
+                    columns: vec!["principal_id", "role_id"],
+                    values: vec![
+                        Value::Integer(principal_id.as_raw() as i64),
+                        Value::Integer(role_id.as_raw() as i64),
+                    ],
+                    enable_flag: 1,
+                },
+            )?;
+            Ok(0)
+        })
+    }
+
+    /// 改名主体（乐观锁）+ 原子重建：期望 `expected_version` 不符 ⇒ `VersionConflict`、
+    /// 整体 ROLLBACK（rev 不进、快照不换）。成功返回 `(expected_version + 1, 新 rev)`。
+    pub fn rename_principal_and_rebuild(
+        &self,
+        actor: &Actor,
+        id: SnowflakeId,
+        expected_version: i64,
+        new_name: &str,
+    ) -> Result<(i64, u64), StoreError> {
+        let now = self.now();
+        self.commit_and_rebuild(|txn| {
+            write::update(
+                txn,
+                now,
+                actor,
+                "principals",
+                id,
+                expected_version,
+                vec!["name"],
+                vec![Value::Text(new_name.to_string())],
+                None,
+            )?;
+            // 乐观锁 UPDATE 恒 version = version + 1：新版本即 expected_version + 1。
+            Ok(expected_version + 1)
+        })
+    }
+
     // ---------------------------------------------------------------- principals
 
     /// 新增一个主体：在写事务内经 `base::write::insert` 落一行 principals

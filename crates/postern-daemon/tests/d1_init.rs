@@ -51,6 +51,7 @@ fn cfg_in(dir: &std::path::Path) -> DaemonConfig {
         vault_path: dir.join("vault.postern"),
         keyfile_path: dir.join("keyfile"),
         control_sock: dir.join("control.sock"),
+        control_token_path: dir.join("control.token"),
         data_sock: dir.join("data.sock"),
         data_sock_group: None,
     }

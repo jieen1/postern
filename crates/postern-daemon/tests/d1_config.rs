@@ -29,6 +29,7 @@ fn clear_all_env() {
         "POSTERN_VAULT",
         "POSTERN_KEYFILE",
         "POSTERN_CONTROL_SOCK",
+        "POSTERN_CONTROL_TOKEN",
         "POSTERN_DATA_SOCK",
         "POSTERN_DATA_GROUP",
         "XDG_RUNTIME_DIR",
