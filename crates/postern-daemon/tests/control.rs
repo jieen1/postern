@@ -415,8 +415,8 @@ async fn health_endpoint_returns_real_health_json() {
     let json: serde_json::Value = serde_json::from_slice(&bytes).expect("health body is JSON");
     assert_eq!(json["status"], "ok", "health 投影 status 须为 ok");
     assert_eq!(
-        json["policy_rev"], 7,
-        "health 投影 policy_rev 须取自 PolicyRepo（FakeRepo rev=7）"
+        json["policy_rev"], "7",
+        "health 投影 policy_rev 取自 PolicyRepo 且序列化为字符串（id-as-string 契约，对齐 types.ts Health / WriteAck）"
     );
 }
 

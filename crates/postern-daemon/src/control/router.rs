@@ -157,7 +157,10 @@ async fn stub_handler() -> axum::http::StatusCode {
 async fn health_handler(
     axum::extract::State(state): axum::extract::State<ControlState>,
 ) -> Json<serde_json::Value> {
-    let policy_rev = state.policy.policy_rev().ok();
+    // policy_rev is a string end-to-end (id-as-string contract; types.ts Health,
+    // and matching WriteAck) — never a JSON number. Read failure folds to null
+    // (health does not crash on a read error).
+    let policy_rev = state.policy.policy_rev().ok().map(|r| r.to_string());
     Json(serde_json::json!({
         "status": "ok",
         "policy_rev": policy_rev,

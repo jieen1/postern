@@ -8,8 +8,13 @@
 
 /** Truncate a snowflake id's middle: `7300…0123`. Short ids pass through. */
 export function truncateId(id: string, head = 4, tail = 4): string {
-  if (id.length <= head + tail + 1) return id;
-  return `${id.slice(0, head)}…${id.slice(-tail)}`;
+  // Defensive: ids are strings by contract, but a single backend shape mismatch
+  // must not throw and blank the whole page (fail-soft over fail-blank). Coerce
+  // and guard nullish rather than crash on `.slice`/`.length`.
+  if (id === null || id === undefined) return '—';
+  const s = typeof id === 'string' ? id : String(id);
+  if (s.length <= head + tail + 1) return s;
+  return `${s.slice(0, head)}…${s.slice(-tail)}`;
 }
 
 /** Format an absolute wall-clock ms/ISO string for a dense table cell. */

@@ -15,6 +15,7 @@ module.exports = {
     'node_modules',
     'playwright-report',
     'test-results',
+    'src-tauri',
     '*.config.ts',
     '*.config.js',
     '.eslintrc.cjs',
