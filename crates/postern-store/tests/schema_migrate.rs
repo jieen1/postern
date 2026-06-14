@@ -83,6 +83,30 @@ fn v1_db() -> Db {
     db
 }
 
+/// 构造一个**旧 v2 库**：施加 v0→v1（建全套业务表）+ v1→v2（建 `policy_meta`）两步，
+/// 把 `user_version` 钉在 2，且**不**建 v3 才有的 `settings` 表——即 v2 实现写出的库形态。
+/// DDL 文本取自被测 `ddl::forward_steps` 返回的对应步（其 `ddl` 是常量，字面 needle 落在
+/// schema.sql / 迁移常量而非本测试源），经 `execute_batch` 施加。供 v2→v3 前向迁移往返
+/// 测试构造前置态。
+fn v2_db() -> Db {
+    use postern_store::migrate::ddl;
+    let db = Db::open_in_memory().expect("in-memory db opens");
+    let steps = ddl::forward_steps(0).expect("forward steps from empty");
+    for (from, to) in [(0, 1), (1, 2)] {
+        let step = steps
+            .iter()
+            .find(|s| s.from == from && s.to == to)
+            .expect("forward step exists");
+        db.with_write_txn(|txn| {
+            txn.execute_batch(step.ddl).map_err(|_| StoreError::Io)?;
+            Ok(())
+        })
+        .expect("forward DDL applies");
+    }
+    migrate::set_schema_version(&db, 2).expect("pin user_version at v2");
+    db
+}
+
 /// 表的列清单（`PRAGMA table_info`，无任何读关键词 needle）。返回小写列名集合。
 fn columns_of(db: &Db, table: &str) -> Vec<String> {
     let pragma = format!("PRAGMA table_info({table})");
@@ -422,6 +446,78 @@ fn migrate_v1_to_v2_then_bump_seeds_policy_rev() {
         read_policy_rev(&db).expect("read after bump"),
         1,
         "persisted rev is 1"
+    );
+}
+
+#[test]
+fn migrate_v2_to_v3_advances_version_and_creates_settings() {
+    // §8-一F-15：旧 v2 库（有 policy_meta，无 settings）→ migrate 单事务前向追平至 v3、
+    // 建 settings、版本前进至当前。前向步只建表不破坏数据（往返：v2 → migrate → v3）。
+    let db = v2_db();
+    assert_eq!(
+        migrate::schema_version(&db).expect("v2 version"),
+        2,
+        "starts at v2"
+    );
+    assert!(
+        table_exists(&db, "policy_meta"),
+        "v2 db already has policy_meta"
+    );
+    assert!(!table_exists(&db, "settings"), "v2 db has no settings yet");
+
+    migrate::migrate(&db).expect("v2->v3 forward migration succeeds");
+
+    assert_eq!(
+        migrate::schema_version(&db).expect("post-migrate version"),
+        CURRENT_SCHEMA_VERSION,
+        "user_version advances from v2 to current (v3)"
+    );
+    assert!(
+        table_exists(&db, "settings"),
+        "v2->v3 step creates settings table"
+    );
+}
+
+#[test]
+fn migrate_v2_to_v3_preserves_existing_policy_rev_and_business_data() {
+    // §8-一F-15：v2→v3 前向迁移只建新表（settings）、绝不改写已有数据——迁移前经写路径
+    // 落的 policy_rev 与业务行在迁移后逐行存活（往返数据不变性：写 v2 → migrate → 仍在）。
+    use postern_store::base::meta::read_policy_rev;
+    let db = v2_db();
+    let idgen = idgen_at(EPOCH_UNIX_MS);
+    let now = now_at(EPOCH_UNIX_MS);
+    let pid = insert_principal(&db, &idgen, now, "alice").expect("insert principal at v2");
+    // 经唯一写路径把 policy_rev 推到 2，作为"迁移前已存在的 store 级状态"。
+    db.with_write_txn(write::bump_policy_rev)
+        .expect("bump policy_rev at v2");
+    db.with_write_txn(write::bump_policy_rev)
+        .expect("bump policy_rev at v2");
+    assert_eq!(
+        read_policy_rev(&db).expect("rev before migrate"),
+        2,
+        "policy_rev is 2 before v2->v3 migration"
+    );
+
+    migrate::migrate(&db).expect("v2->v3 forward migration succeeds");
+
+    assert_eq!(
+        migrate::schema_version(&db).expect("version after migrate"),
+        CURRENT_SCHEMA_VERSION,
+        "reached v3"
+    );
+    assert_eq!(
+        read_policy_rev(&db).expect("rev after migrate"),
+        2,
+        "policy_rev written under v2 survives the v2->v3 migration"
+    );
+    assert_eq!(
+        count_where(
+            &db,
+            "principals",
+            &format!("id = {pid} AND delete_flag = 0")
+        ),
+        1,
+        "the principal written under v2 survives the v2->v3 migration"
     );
 }
 

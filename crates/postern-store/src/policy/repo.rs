@@ -6,16 +6,19 @@
 //! [`base::scope`](crate::base::scope) 的分页执行器（默认作用域 `delete_flag = 0`
 //! + `LIMIT`），返回携 `version` 的读模型行。
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::base::db::Db;
 use crate::base::error::StoreError;
 use crate::base::scope::execute_page;
+use crate::base::timestamp;
 use crate::base::write::{self, Actor, InsertRow};
 use crate::snapshot::{build_snapshot_on, SnapshotView};
-use postern_core::domain::Timestamp;
+use postern_core::domain::{Capability, PrincipalId, ResourceCode, Timestamp};
 use postern_core::id::{Clock, IdGen, SnowflakeId};
 use postern_core::page::{Page, PageQuery};
+use postern_core::plugin::PolicyView;
 use rusqlite::types::Value;
 
 /// principals 读模型行：8 基础字段中对调用方有意义的子集（含 `version` 供乐观锁
@@ -71,6 +74,133 @@ pub struct BindingRow {
     pub principal_id: SnowflakeId,
     /// 被绑定角色 id。
     pub role_id: SnowflakeId,
+}
+
+/// binding_scope 读模型行（绑定辖区：`resource` 枚举 / `selector` 标签选择器，二选一）。
+/// 一个绑定可有 0..N 条辖区行（resource 多枚举 / selector），故独立成行投影，**不**塞进
+/// [`BindingRow`]（避免对 1:N 关系做有损的"单 scope"建模）。`resource_id`/`selector` 按
+/// `kind` 二选一非空（store 忠实读出原始值；标签展开为资源集是 daemon 从快照投影）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindingScopeRow {
+    /// 主键。
+    pub id: SnowflakeId,
+    /// 乐观锁版本。
+    pub version: i64,
+    /// 所属绑定 id。
+    pub binding_id: SnowflakeId,
+    /// 辖区种类（`resource`/`selector`，schema CHECK 兜底）。
+    pub kind: String,
+    /// 枚举资源 id（`kind = 'resource'` 时非空；`selector` 时为空）。
+    pub resource_id: Option<SnowflakeId>,
+    /// 标签选择器（`kind = 'selector'` 时非空；`resource` 时为空）。
+    pub selector: Option<String>,
+}
+
+/// settings 读模型行（业务级标量配置键值对；限制性表）。元数据（默认值/是否可写/类型）
+/// 不入库——由 daemon 按已知 key 定义；store 只忠实承载 `key`/`value` + 乐观锁 `version`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingRow {
+    /// 主键。
+    pub id: SnowflakeId,
+    /// 乐观锁版本。
+    pub version: i64,
+    /// 业务键（partial unique，`WHERE delete_flag = 0`）。
+    pub key: String,
+    /// 当前值（NOT NULL 文本）。
+    pub value: String,
+}
+
+/// grant_constraints 读模型行（对象细则；限制性表）。`id` 留 [`SnowflakeId`] 原始值，
+/// daemon 侧再转 string。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConstraintRow {
+    /// 主键。
+    pub id: SnowflakeId,
+    /// 乐观锁版本。
+    pub version: i64,
+    /// 受约束资源 id（grant_constraints 上 NOT NULL）。
+    pub resource_id: SnowflakeId,
+    /// 受约束动词。
+    pub capability: String,
+    /// 约束种类。
+    pub kind: String,
+    /// 约束规格（可空 JSON 文本）。
+    pub spec: Option<String>,
+}
+
+/// grant_conditions 读模型行（求值条件；限制性表）。`resource_id` / `capability`
+/// 可空（资源级 / 全动词通用条件），`predicate` NOT NULL。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConditionRow {
+    /// 主键。
+    pub id: SnowflakeId,
+    /// 乐观锁版本。
+    pub version: i64,
+    /// 受约束资源 id（可空：空 = 全局通用条件）。
+    pub resource_id: Option<SnowflakeId>,
+    /// 受约束动词（可空：空 = 资源全动词通用）。
+    pub capability: Option<String>,
+    /// 求值谓词（NOT NULL）。
+    pub predicate: String,
+    /// 条件规格（可空 JSON 文本）。
+    pub spec: Option<String>,
+}
+
+/// deny_notes 读模型行（人亲笔预写的拒绝说明；限制性表）。uq(resource_id, capability)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DenyNoteRow {
+    /// 主键。
+    pub id: SnowflakeId,
+    /// 乐观锁版本。
+    pub version: i64,
+    /// 受约束资源 id（deny_notes 上 NOT NULL）。
+    pub resource_id: SnowflakeId,
+    /// 受约束动词（NOT NULL）。
+    pub capability: String,
+    /// 拒绝说明（NOT NULL）。
+    pub note: String,
+}
+
+/// mode_state 读模型行（辖区运行模式；限制性表）。`scope_resource_id` 可空
+/// （`None` = 全局模式哨兵）；`expires_at` 可空。每辖区至多一行活跃（uq ON
+/// COALESCE(scope_resource_id, 0)）。`effective_mode` 是 daemon 侧投影，store 不算。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModeStateRow {
+    /// 主键。
+    pub id: SnowflakeId,
+    /// 乐观锁版本。
+    pub version: i64,
+    /// 受约束辖区资源 id（`None` = 全局模式）。
+    pub scope_resource_id: Option<SnowflakeId>,
+    /// 模式文本（`normal`/`observe`/`maintain`/`freeze`，schema CHECK 兜底）。
+    pub mode: String,
+    /// 过期墙钟文本（可空：空 = 不过期）。
+    pub expires_at: Option<String>,
+}
+
+/// temp_grants 读模型行（临时授权；终态字段 `ended_at`/`end_reason`）。`granted_at`/
+/// `expires_at` NOT NULL（24 字节文本）；`ended_at`/`end_reason` 可空（活跃时为空，
+/// 置终态后填 `expired`/`revoked`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TempGrantRow {
+    /// 主键。
+    pub id: SnowflakeId,
+    /// 乐观锁版本。
+    pub version: i64,
+    /// 被授权主体 id。
+    pub principal_id: SnowflakeId,
+    /// 被授权资源 id。
+    pub resource_id: SnowflakeId,
+    /// 被授权动词。
+    pub capability: String,
+    /// 授予墙钟（NOT NULL）。
+    pub granted_at: String,
+    /// 过期墙钟（NOT NULL）。
+    pub expires_at: String,
+    /// 终态墙钟（可空：活跃时为空）。
+    pub ended_at: Option<String>,
+    /// 终态原因（可空：`expired`/`revoked`）。
+    pub end_reason: Option<String>,
 }
 
 /// 策略状态事务读写句柄：持 [`Db`] 与 [`IdGen`]，仅控制面（daemon::control +
@@ -308,6 +438,68 @@ impl PolicyRepo {
         })
     }
 
+    /// 绑定主体到角色 + 同事务写一条辖区 + 原子重建：在**同一** `commit_and_rebuild`
+    /// 闭包内先经 `base::write::insert` 落一行 bindings，再以其新 id 落一行 binding_scope
+    /// （`kind` = `resource`/`selector`，`resource_id`/`selector` 二选一），最后 bump rev、
+    /// 重建并发布快照。任一步 Err（含 partial unique 冲突）⇒ 整体 ROLLBACK（绑定与辖区
+    /// 均不留、rev 不进、快照不换）。`scope_resource_id` 与 `scope_selector` 由调用方按
+    /// `kind` 二选一提供（store 忠实落库，二选一语义由上层保证）。返回 `(新绑定 version=0, 新 rev)`。
+    pub fn create_binding_with_scope_and_rebuild(
+        &self,
+        actor: &Actor,
+        principal_id: SnowflakeId,
+        role_id: SnowflakeId,
+        scope_kind: &str,
+        scope_resource_id: Option<SnowflakeId>,
+        scope_selector: Option<&str>,
+    ) -> Result<(i64, u64), StoreError> {
+        let now = self.now();
+        let res_val = match scope_resource_id {
+            Some(r) => Value::Integer(r.as_raw() as i64),
+            None => Value::Null,
+        };
+        let sel_val = match scope_selector {
+            Some(s) => Value::Text(s.to_string()),
+            None => Value::Null,
+        };
+        self.commit_and_rebuild(|txn| {
+            let binding_id = write::insert(
+                txn,
+                &self.idgen,
+                now,
+                actor,
+                InsertRow {
+                    table: "bindings",
+                    columns: vec!["principal_id", "role_id"],
+                    values: vec![
+                        Value::Integer(principal_id.as_raw() as i64),
+                        Value::Integer(role_id.as_raw() as i64),
+                    ],
+                    enable_flag: 1,
+                },
+            )?;
+            write::insert(
+                txn,
+                &self.idgen,
+                now,
+                actor,
+                InsertRow {
+                    table: "binding_scope",
+                    columns: vec!["binding_id", "kind", "resource_id", "selector"],
+                    values: vec![
+                        Value::Integer(binding_id.as_raw() as i64),
+                        Value::Text(scope_kind.to_string()),
+                        res_val,
+                        sel_val,
+                    ],
+                    enable_flag: 1,
+                },
+            )?;
+            // 新绑定 INSERT 固定落 version = 0（base::write::insert）。
+            Ok(0)
+        })
+    }
+
     /// 改名主体（乐观锁）+ 原子重建：期望 `expected_version` 不符 ⇒ `VersionConflict`、
     /// 整体 ROLLBACK（rev 不进、快照不换）。成功返回 `(expected_version + 1, 新 rev)`。
     pub fn rename_principal_and_rebuild(
@@ -331,6 +523,390 @@ impl PolicyRepo {
                 None,
             )?;
             // 乐观锁 UPDATE 恒 version = version + 1：新版本即 expected_version + 1。
+            Ok(expected_version + 1)
+        })
+    }
+
+    /// 新增对象细则 + 原子重建：经 `base::write::insert` 落一行 grant_constraints
+    /// （`resource_id`/`capability`/`kind`/`spec`；限制性表 `enable_flag` 固定 1）。
+    /// 返回 `(新行 version=0, 新 rev)`。
+    pub fn create_constraint_and_rebuild(
+        &self,
+        actor: &Actor,
+        resource_id: SnowflakeId,
+        capability: &str,
+        kind: &str,
+        spec: Option<&str>,
+    ) -> Result<(i64, u64), StoreError> {
+        let now = self.now();
+        let spec_val = match spec {
+            Some(s) => Value::Text(s.to_string()),
+            None => Value::Null,
+        };
+        self.commit_and_rebuild(|txn| {
+            write::insert(
+                txn,
+                &self.idgen,
+                now,
+                actor,
+                InsertRow {
+                    table: "grant_constraints",
+                    columns: vec!["resource_id", "capability", "kind", "spec"],
+                    values: vec![
+                        Value::Integer(resource_id.as_raw() as i64),
+                        Value::Text(capability.to_string()),
+                        Value::Text(kind.to_string()),
+                        spec_val,
+                    ],
+                    enable_flag: 1,
+                },
+            )?;
+            Ok(0)
+        })
+    }
+
+    /// 逻辑删除对象细则（乐观锁）+ 原子重建：期望 `expected_version` 不符 ⇒
+    /// `VersionConflict`、整体 ROLLBACK（rev 不进、快照不换）。成功返回
+    /// `(expected_version + 1, 新 rev)`。
+    pub fn delete_constraint_and_rebuild(
+        &self,
+        actor: &Actor,
+        id: SnowflakeId,
+        expected_version: i64,
+    ) -> Result<(i64, u64), StoreError> {
+        let now = self.now();
+        self.commit_and_rebuild(|txn| {
+            write::logical_delete(txn, now, actor, "grant_constraints", id, expected_version)?;
+            Ok(expected_version + 1)
+        })
+    }
+
+    /// 新增求值条件 + 原子重建：经 `base::write::insert` 落一行 grant_conditions
+    /// （`resource_id`/`capability` 可空、`predicate` NOT NULL、`spec` 可空；
+    /// 限制性表 `enable_flag` 固定 1）。返回 `(新行 version=0, 新 rev)`。
+    pub fn create_condition_and_rebuild(
+        &self,
+        actor: &Actor,
+        resource_id: Option<SnowflakeId>,
+        capability: Option<&str>,
+        predicate: &str,
+        spec: Option<&str>,
+    ) -> Result<(i64, u64), StoreError> {
+        let now = self.now();
+        let res_val = match resource_id {
+            Some(r) => Value::Integer(r.as_raw() as i64),
+            None => Value::Null,
+        };
+        let cap_val = match capability {
+            Some(c) => Value::Text(c.to_string()),
+            None => Value::Null,
+        };
+        let spec_val = match spec {
+            Some(s) => Value::Text(s.to_string()),
+            None => Value::Null,
+        };
+        self.commit_and_rebuild(|txn| {
+            write::insert(
+                txn,
+                &self.idgen,
+                now,
+                actor,
+                InsertRow {
+                    table: "grant_conditions",
+                    columns: vec!["resource_id", "capability", "predicate", "spec"],
+                    values: vec![
+                        res_val,
+                        cap_val,
+                        Value::Text(predicate.to_string()),
+                        spec_val,
+                    ],
+                    enable_flag: 1,
+                },
+            )?;
+            Ok(0)
+        })
+    }
+
+    /// 逻辑删除求值条件（乐观锁）+ 原子重建：期望 `expected_version` 不符 ⇒
+    /// `VersionConflict`、整体 ROLLBACK。成功返回 `(expected_version + 1, 新 rev)`。
+    pub fn delete_condition_and_rebuild(
+        &self,
+        actor: &Actor,
+        id: SnowflakeId,
+        expected_version: i64,
+    ) -> Result<(i64, u64), StoreError> {
+        let now = self.now();
+        self.commit_and_rebuild(|txn| {
+            write::logical_delete(txn, now, actor, "grant_conditions", id, expected_version)?;
+            Ok(expected_version + 1)
+        })
+    }
+
+    /// 新增拒绝说明 + 原子重建：经 `base::write::insert` 落一行 deny_notes
+    /// （`resource_id`/`capability`/`note` 均 NOT NULL；限制性表 `enable_flag` 固定 1）。
+    /// 同 `(resource_id, capability)` 重复（`delete_flag=0`）→ uq 拒 →
+    /// [`StoreError::ConstraintViolation`]，整体 ROLLBACK（rev 不进、快照不换）。
+    /// 返回 `(新行 version=0, 新 rev)`。
+    pub fn create_deny_note_and_rebuild(
+        &self,
+        actor: &Actor,
+        resource_id: SnowflakeId,
+        capability: &str,
+        note: &str,
+    ) -> Result<(i64, u64), StoreError> {
+        let now = self.now();
+        self.commit_and_rebuild(|txn| {
+            write::insert(
+                txn,
+                &self.idgen,
+                now,
+                actor,
+                InsertRow {
+                    table: "deny_notes",
+                    columns: vec!["resource_id", "capability", "note"],
+                    values: vec![
+                        Value::Integer(resource_id.as_raw() as i64),
+                        Value::Text(capability.to_string()),
+                        Value::Text(note.to_string()),
+                    ],
+                    enable_flag: 1,
+                },
+            )?;
+            Ok(0)
+        })
+    }
+
+    /// 逻辑删除拒绝说明（乐观锁）+ 原子重建：期望 `expected_version` 不符 ⇒
+    /// `VersionConflict`、整体 ROLLBACK。成功返回 `(expected_version + 1, 新 rev)`。
+    pub fn delete_deny_note_and_rebuild(
+        &self,
+        actor: &Actor,
+        id: SnowflakeId,
+        expected_version: i64,
+    ) -> Result<(i64, u64), StoreError> {
+        let now = self.now();
+        self.commit_and_rebuild(|txn| {
+            write::logical_delete(txn, now, actor, "deny_notes", id, expected_version)?;
+            Ok(expected_version + 1)
+        })
+    }
+
+    // ----------------------------------------------- mode（upsert）+ 原子重建
+
+    /// 设置辖区运行模式（**upsert**）+ 原子重建：按 uq `ON COALESCE(scope_resource_id, 0)`
+    /// 的语义，若该辖区已有活跃行（`delete_flag=0`）则经 `base::write::update` 乐观锁
+    /// 改其 `mode`/`expires_at`（version 自增）；否则经 `base::write::insert` 落新行。
+    /// 全局辖区以 `scope_resource_id = None`（NULL 哨兵）表达。
+    ///
+    /// store 忠实落入调用方给定的 `mode`/`expires_at`（收窄语义由上层保证）。返回
+    /// `(新 version, 新 rev)`：插入分支 `version = 0`，更新分支 `version = 既有 + 1`。
+    /// `expires_at` 由调用方按需提供（mode_state.expires_at 无固定宽度约束，如实落库）。
+    pub fn set_mode_and_rebuild(
+        &self,
+        actor: &Actor,
+        scope_resource_id: Option<SnowflakeId>,
+        mode: &str,
+        expires_at: Option<&str>,
+    ) -> Result<(i64, u64), StoreError> {
+        let now = self.now();
+        let exp_val = match expires_at {
+            Some(e) => Value::Text(e.to_string()),
+            None => Value::Null,
+        };
+        self.commit_and_rebuild(|txn| {
+            // 在写事务内按辖区哨兵（COALESCE(scope_resource_id, 0)）查既有活跃行
+            // （id, version）以决定 insert vs update —— 写一律经 base::write。
+            let sentinel = scope_resource_id.map(|r| r.as_raw() as i64).unwrap_or(0);
+            let existing: Option<(i64, i64)> = txn
+                .query_row(
+                    "SELECT id, version FROM mode_state \
+                     WHERE COALESCE(scope_resource_id, 0) = ?1 AND delete_flag = 0 LIMIT 1",
+                    [sentinel],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .ok();
+
+            match existing {
+                Some((id_raw, version)) => {
+                    // 既有行 → 乐观锁就地改 mode/expires_at（收窄 upsert）。
+                    write::update(
+                        txn,
+                        now,
+                        actor,
+                        "mode_state",
+                        SnowflakeId::from_raw(id_raw as u64),
+                        version,
+                        vec!["mode", "expires_at"],
+                        vec![Value::Text(mode.to_string()), exp_val],
+                        None,
+                    )?;
+                    Ok(version + 1)
+                }
+                None => {
+                    // 新辖区 → 插新行（限制性表 enable_flag 固定 1）。
+                    let scope_val = match scope_resource_id {
+                        Some(r) => Value::Integer(r.as_raw() as i64),
+                        None => Value::Null,
+                    };
+                    write::insert(
+                        txn,
+                        &self.idgen,
+                        now,
+                        actor,
+                        InsertRow {
+                            table: "mode_state",
+                            columns: vec!["scope_resource_id", "mode", "expires_at"],
+                            values: vec![scope_val, Value::Text(mode.to_string()), exp_val],
+                            enable_flag: 1,
+                        },
+                    )?;
+                    Ok(0)
+                }
+            }
+        })
+    }
+
+    // ----------------------------------------------- settings（upsert by key）+ 原子重建
+
+    /// 设置一个业务级配置项（**upsert by key**）+ 原子重建：按 `key` 的 partial unique
+    /// （`WHERE delete_flag = 0`）语义，若该 key 已有活跃行则经 `base::write::update` 乐观锁
+    /// 改其 `value`（version 自增）；否则经 `base::write::insert` 落新行。元数据
+    /// （默认值/是否可写/类型）不入库——由 daemon 按已知 key 定义；store 只忠实落 `value`。
+    ///
+    /// 返回 `(新 version, 新 rev)`：插入分支 `version = 0`，更新分支 `version = 既有 + 1`。
+    /// 写一律经 `base::write`（限制性表 `enable_flag` 固定 1，唯一写路径）；写事务内按
+    /// key 查既有活跃行（id, version）以决定 insert vs update（带 `delete_flag = 0` + `LIMIT 1`）。
+    pub fn set_setting_and_rebuild(
+        &self,
+        actor: &Actor,
+        key: &str,
+        value: &str,
+    ) -> Result<(i64, u64), StoreError> {
+        let now = self.now();
+        self.commit_and_rebuild(|txn| {
+            // 在写事务内按 key 查既有活跃行（id, version）以决定 insert vs update——写一律经
+            // base::write（本闭包仅省读以分流，默认作用域 delete_flag = 0 + LIMIT 1）。
+            let existing: Option<(i64, i64)> = txn
+                .query_row(
+                    "SELECT id, version FROM settings \
+                     WHERE key = ?1 AND delete_flag = 0 LIMIT 1",
+                    [key],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .ok();
+
+            match existing {
+                Some((id_raw, version)) => {
+                    // 既有 key → 乐观锁就地改 value（同 key 再次写改既有行，不新增）。
+                    write::update(
+                        txn,
+                        now,
+                        actor,
+                        "settings",
+                        SnowflakeId::from_raw(id_raw as u64),
+                        version,
+                        vec!["value"],
+                        vec![Value::Text(value.to_string())],
+                        None,
+                    )?;
+                    Ok(version + 1)
+                }
+                None => {
+                    // 新 key → 插新行（限制性表 enable_flag 固定 1）。
+                    write::insert(
+                        txn,
+                        &self.idgen,
+                        now,
+                        actor,
+                        InsertRow {
+                            table: "settings",
+                            columns: vec!["key", "value"],
+                            values: vec![
+                                Value::Text(key.to_string()),
+                                Value::Text(value.to_string()),
+                            ],
+                            enable_flag: 1,
+                        },
+                    )?;
+                    Ok(0)
+                }
+            }
+        })
+    }
+
+    // ----------------------------------------------- grants（temp_grants）+ 原子重建
+
+    /// 临时提权（直授）+ 原子重建：经 `base::write::insert` 落一行 temp_grants
+    /// （`principal_id`/`resource_id`/`capability`/`granted_at`/`expires_at`）。
+    /// `granted_at = now`、`expires_at = now + ttl_ms`，二者经唯一格式化点
+    /// （[`base::timestamp::format`](crate::base::timestamp::format)）落 24 字节文本。
+    /// `ended_at`/`end_reason` 留空（活跃）。返回 `(新行 version=0, 新 rev)`。
+    pub fn elevate_grant_and_rebuild(
+        &self,
+        actor: &Actor,
+        principal_id: SnowflakeId,
+        resource_id: SnowflakeId,
+        capability: &str,
+        ttl_ms: u64,
+    ) -> Result<(i64, u64), StoreError> {
+        let now = self.now();
+        let granted_at = timestamp::format(now);
+        let expires_at = timestamp::format(Timestamp::from_unix_ms(
+            now.as_unix_ms().saturating_add(ttl_ms),
+        ));
+        self.commit_and_rebuild(|txn| {
+            write::insert(
+                txn,
+                &self.idgen,
+                now,
+                actor,
+                InsertRow {
+                    table: "temp_grants",
+                    columns: vec![
+                        "principal_id",
+                        "resource_id",
+                        "capability",
+                        "granted_at",
+                        "expires_at",
+                    ],
+                    values: vec![
+                        Value::Integer(principal_id.as_raw() as i64),
+                        Value::Integer(resource_id.as_raw() as i64),
+                        Value::Text(capability.to_string()),
+                        Value::Text(granted_at),
+                        Value::Text(expires_at),
+                    ],
+                    enable_flag: 1,
+                },
+            )?;
+            Ok(0)
+        })
+    }
+
+    /// 撤销临时授权（乐观锁）+ 原子重建：经 `base::write::update` 置该行终态
+    /// `ended_at = now`、`end_reason = 'revoked'`（version 自增）。期望
+    /// `expected_version` 不符 ⇒ [`StoreError::VersionConflict`]、整体 ROLLBACK
+    /// （rev 不进、快照不换）。成功返回 `(expected_version + 1, 新 rev)`。
+    pub fn revoke_grant_and_rebuild(
+        &self,
+        actor: &Actor,
+        id: SnowflakeId,
+        expected_version: i64,
+    ) -> Result<(i64, u64), StoreError> {
+        let now = self.now();
+        let ended_at = timestamp::format(now);
+        self.commit_and_rebuild(|txn| {
+            write::update(
+                txn,
+                now,
+                actor,
+                "temp_grants",
+                id,
+                expected_version,
+                vec!["ended_at", "end_reason"],
+                vec![Value::Text(ended_at), Value::Text("revoked".to_string())],
+                None,
+            )?;
             Ok(expected_version + 1)
         })
     }
@@ -653,6 +1229,219 @@ impl PolicyRepo {
                 })
             },
         )
+    }
+
+    /// 分页列出**全部**绑定（**无主体过滤**；默认作用域 `delete_flag=0`、`LIMIT` 封顶）。
+    /// 与 [`list_bindings_of`](PolicyRepo::list_bindings_of)（按主体过滤）互补，供控制面
+    /// 全量列读多主体绑定。`principal`/`role` 名与 `expanded_resources` 是 daemon 从快照
+    /// 投影，store 只给 id + version。
+    pub fn list_bindings(&self, page: PageQuery) -> Result<Page<BindingRow>, StoreError> {
+        let list = "SELECT id, version, principal_id, role_id FROM bindings \
+                    WHERE delete_flag = 0 ORDER BY id LIMIT ?1 OFFSET ?2";
+        let count = "SELECT COUNT(*) FROM bindings WHERE delete_flag = 0";
+        execute_page(&self.db, list, count, page, |r| {
+            Ok(BindingRow {
+                id: SnowflakeId::from_raw(r.get::<_, i64>(0).map_err(|_| StoreError::Io)? as u64),
+                version: r.get(1).map_err(|_| StoreError::Io)?,
+                principal_id: SnowflakeId::from_raw(
+                    r.get::<_, i64>(2).map_err(|_| StoreError::Io)? as u64,
+                ),
+                role_id: SnowflakeId::from_raw(
+                    r.get::<_, i64>(3).map_err(|_| StoreError::Io)? as u64
+                ),
+            })
+        })
+    }
+
+    /// 分页列出绑定辖区（默认作用域 `delete_flag=0`、`LIMIT` 封顶）。一个绑定可有 0..N
+    /// 条辖区行，逐条如实读出（`resource_id`/`selector` 按 `kind` 二选一非空；标签展开为
+    /// 资源集是 daemon 从快照投影，store 只给原始 scope）。
+    pub fn list_binding_scopes(
+        &self,
+        page: PageQuery,
+    ) -> Result<Page<BindingScopeRow>, StoreError> {
+        let list =
+            "SELECT id, version, binding_id, kind, resource_id, selector FROM binding_scope \
+                    WHERE delete_flag = 0 ORDER BY id LIMIT ?1 OFFSET ?2";
+        let count = "SELECT COUNT(*) FROM binding_scope WHERE delete_flag = 0";
+        execute_page(&self.db, list, count, page, |r| {
+            Ok(BindingScopeRow {
+                id: SnowflakeId::from_raw(r.get::<_, i64>(0).map_err(|_| StoreError::Io)? as u64),
+                version: r.get(1).map_err(|_| StoreError::Io)?,
+                binding_id: SnowflakeId::from_raw(
+                    r.get::<_, i64>(2).map_err(|_| StoreError::Io)? as u64
+                ),
+                kind: r.get(3).map_err(|_| StoreError::Io)?,
+                resource_id: r
+                    .get::<_, Option<i64>>(4)
+                    .map_err(|_| StoreError::Io)?
+                    .map(|v| SnowflakeId::from_raw(v as u64)),
+                selector: r.get(5).map_err(|_| StoreError::Io)?,
+            })
+        })
+    }
+
+    // ---------------------------------------------------------------- settings
+
+    /// 分页列出业务级配置项（默认作用域 `delete_flag=0`、`LIMIT` 封顶）。返回携 `version`
+    /// 的 [`SettingRow`]（`key`/`value`）；元数据（默认值/是否可写/类型）不入库，由 daemon
+    /// 按已知 key 定义。
+    pub fn list_settings(&self, page: PageQuery) -> Result<Page<SettingRow>, StoreError> {
+        let list = "SELECT id, version, key, value FROM settings \
+                    WHERE delete_flag = 0 ORDER BY id LIMIT ?1 OFFSET ?2";
+        let count = "SELECT COUNT(*) FROM settings WHERE delete_flag = 0";
+        execute_page(&self.db, list, count, page, |r| {
+            Ok(SettingRow {
+                id: SnowflakeId::from_raw(r.get::<_, i64>(0).map_err(|_| StoreError::Io)? as u64),
+                version: r.get(1).map_err(|_| StoreError::Io)?,
+                key: r.get(2).map_err(|_| StoreError::Io)?,
+                value: r.get(3).map_err(|_| StoreError::Io)?,
+            })
+        })
+    }
+
+    // ---------------------------------------------------------------- constraints / conditions / deny-notes
+
+    /// 分页列出对象细则（限制性表；默认作用域 `delete_flag=0`、`LIMIT` 封顶）。
+    /// 返回携 `version` 的 [`ConstraintRow`]（`id` 留 [`SnowflakeId`]，daemon 再转 string）。
+    pub fn list_constraints(&self, page: PageQuery) -> Result<Page<ConstraintRow>, StoreError> {
+        let list =
+            "SELECT id, version, resource_id, capability, kind, spec FROM grant_constraints \
+                    WHERE delete_flag = 0 ORDER BY id LIMIT ?1 OFFSET ?2";
+        let count = "SELECT COUNT(*) FROM grant_constraints WHERE delete_flag = 0";
+        execute_page(&self.db, list, count, page, |r| {
+            Ok(ConstraintRow {
+                id: SnowflakeId::from_raw(r.get::<_, i64>(0).map_err(|_| StoreError::Io)? as u64),
+                version: r.get(1).map_err(|_| StoreError::Io)?,
+                resource_id: SnowflakeId::from_raw(
+                    r.get::<_, i64>(2).map_err(|_| StoreError::Io)? as u64
+                ),
+                capability: r.get(3).map_err(|_| StoreError::Io)?,
+                kind: r.get(4).map_err(|_| StoreError::Io)?,
+                spec: r.get(5).map_err(|_| StoreError::Io)?,
+            })
+        })
+    }
+
+    /// 分页列出求值条件（限制性表；默认作用域 `delete_flag=0`、`LIMIT` 封顶）。
+    /// `resource_id` / `capability` 可空（资源级 / 全动词通用条件），如实读出。
+    pub fn list_conditions(&self, page: PageQuery) -> Result<Page<ConditionRow>, StoreError> {
+        let list =
+            "SELECT id, version, resource_id, capability, predicate, spec FROM grant_conditions \
+                    WHERE delete_flag = 0 ORDER BY id LIMIT ?1 OFFSET ?2";
+        let count = "SELECT COUNT(*) FROM grant_conditions WHERE delete_flag = 0";
+        execute_page(&self.db, list, count, page, |r| {
+            Ok(ConditionRow {
+                id: SnowflakeId::from_raw(r.get::<_, i64>(0).map_err(|_| StoreError::Io)? as u64),
+                version: r.get(1).map_err(|_| StoreError::Io)?,
+                resource_id: r
+                    .get::<_, Option<i64>>(2)
+                    .map_err(|_| StoreError::Io)?
+                    .map(|v| SnowflakeId::from_raw(v as u64)),
+                capability: r.get(3).map_err(|_| StoreError::Io)?,
+                predicate: r.get(4).map_err(|_| StoreError::Io)?,
+                spec: r.get(5).map_err(|_| StoreError::Io)?,
+            })
+        })
+    }
+
+    /// 分页列出拒绝说明（限制性表；默认作用域 `delete_flag=0`、`LIMIT` 封顶）。
+    pub fn list_deny_notes(&self, page: PageQuery) -> Result<Page<DenyNoteRow>, StoreError> {
+        let list = "SELECT id, version, resource_id, capability, note FROM deny_notes \
+                    WHERE delete_flag = 0 ORDER BY id LIMIT ?1 OFFSET ?2";
+        let count = "SELECT COUNT(*) FROM deny_notes WHERE delete_flag = 0";
+        execute_page(&self.db, list, count, page, |r| {
+            Ok(DenyNoteRow {
+                id: SnowflakeId::from_raw(r.get::<_, i64>(0).map_err(|_| StoreError::Io)? as u64),
+                version: r.get(1).map_err(|_| StoreError::Io)?,
+                resource_id: SnowflakeId::from_raw(
+                    r.get::<_, i64>(2).map_err(|_| StoreError::Io)? as u64
+                ),
+                capability: r.get(3).map_err(|_| StoreError::Io)?,
+                note: r.get(4).map_err(|_| StoreError::Io)?,
+            })
+        })
+    }
+
+    // ---------------------------------------------------------------- mode_state / temp_grants
+
+    /// 分页列出辖区运行模式（限制性表；默认作用域 `delete_flag=0`、`LIMIT` 封顶）。
+    /// `scope_resource_id` 可空（`None` = 全局模式），如实读出。`effective_mode` 是
+    /// daemon 侧投影，store 不算（本读法仅忠实返回各辖区落库的 `mode`/`expires_at`）。
+    pub fn list_mode_state(&self, page: PageQuery) -> Result<Page<ModeStateRow>, StoreError> {
+        let list = "SELECT id, version, scope_resource_id, mode, expires_at FROM mode_state \
+                    WHERE delete_flag = 0 ORDER BY id LIMIT ?1 OFFSET ?2";
+        let count = "SELECT COUNT(*) FROM mode_state WHERE delete_flag = 0";
+        execute_page(&self.db, list, count, page, |r| {
+            Ok(ModeStateRow {
+                id: SnowflakeId::from_raw(r.get::<_, i64>(0).map_err(|_| StoreError::Io)? as u64),
+                version: r.get(1).map_err(|_| StoreError::Io)?,
+                scope_resource_id: r
+                    .get::<_, Option<i64>>(2)
+                    .map_err(|_| StoreError::Io)?
+                    .map(|v| SnowflakeId::from_raw(v as u64)),
+                mode: r.get(3).map_err(|_| StoreError::Io)?,
+                expires_at: r.get(4).map_err(|_| StoreError::Io)?,
+            })
+        })
+    }
+
+    /// 分页列出临时授权（默认作用域 `delete_flag=0`、`LIMIT` 封顶）。终态字段
+    /// `ended_at`/`end_reason` 可空（活跃时为空），如实读出——撤销/过期的行仍在列表
+    /// （终态、非逻辑删除）。
+    pub fn list_temp_grants(&self, page: PageQuery) -> Result<Page<TempGrantRow>, StoreError> {
+        let list = "SELECT id, version, principal_id, resource_id, capability, granted_at, \
+                    expires_at, ended_at, end_reason FROM temp_grants \
+                    WHERE delete_flag = 0 ORDER BY id LIMIT ?1 OFFSET ?2";
+        let count = "SELECT COUNT(*) FROM temp_grants WHERE delete_flag = 0";
+        execute_page(&self.db, list, count, page, |r| {
+            Ok(TempGrantRow {
+                id: SnowflakeId::from_raw(r.get::<_, i64>(0).map_err(|_| StoreError::Io)? as u64),
+                version: r.get(1).map_err(|_| StoreError::Io)?,
+                principal_id: SnowflakeId::from_raw(
+                    r.get::<_, i64>(2).map_err(|_| StoreError::Io)? as u64,
+                ),
+                resource_id: SnowflakeId::from_raw(
+                    r.get::<_, i64>(3).map_err(|_| StoreError::Io)? as u64
+                ),
+                capability: r.get(4).map_err(|_| StoreError::Io)?,
+                granted_at: r.get(5).map_err(|_| StoreError::Io)?,
+                expires_at: r.get(6).map_err(|_| StoreError::Io)?,
+                ended_at: r.get(7).map_err(|_| StoreError::Io)?,
+                end_reason: r.get(8).map_err(|_| StoreError::Io)?,
+            })
+        })
+    }
+
+    /// 主体的 `your_grants` 投影：从**已物化快照**（`SnapshotView::snapshot()`）取该主体
+    /// 在授权空间里的 `resource → capability[]`（物化已含 binding×角色×辖区 ∪ 有效
+    /// temp_grants，见 [`build_snapshot`](crate::snapshot::build_snapshot)）。store 不在此处
+    /// 重算授权——只读快照里该主体的格、按资源聚合其动词集（每资源去重、有序）。
+    ///
+    /// 未持视图（[`PolicyRepo::new`]，无 `SnapshotView`）或该主体无任何格 → 空映射。
+    pub fn your_grants_view(
+        &self,
+        principal_id: SnowflakeId,
+    ) -> BTreeMap<ResourceCode, Vec<Capability>> {
+        let mut out: BTreeMap<ResourceCode, Vec<Capability>> = BTreeMap::new();
+        let Some(view) = &self.view else {
+            return out; // 不持视图 → 无可投影的物化快照
+        };
+        let snapshot = view.snapshot();
+        let principal = PrincipalId::new(principal_id);
+        let Some(cells) = snapshot.grants.get(&principal) else {
+            return out; // 该主体无任何授权格
+        };
+        for (resource, capability) in cells.keys() {
+            let caps = out.entry(resource.clone()).or_default();
+            if !caps.contains(capability) {
+                caps.push(*capability);
+            }
+        }
+        for caps in out.values_mut() {
+            caps.sort();
+        }
+        out
     }
 }
 

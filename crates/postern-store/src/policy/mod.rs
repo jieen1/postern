@@ -22,4 +22,7 @@
 
 pub mod repo;
 
-pub use repo::{BindingRow, PolicyRepo, PrincipalRow, ResourceRow, RoleRow};
+pub use repo::{
+    BindingRow, BindingScopeRow, ConditionRow, ConstraintRow, DenyNoteRow, ModeStateRow,
+    PolicyRepo, PrincipalRow, ResourceRow, RoleRow, SettingRow, TempGrantRow,
+};

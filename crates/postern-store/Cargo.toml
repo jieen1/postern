@@ -14,3 +14,8 @@ thiserror = "2"
 [[test]]
 name = "policy_rev"
 path = "tests/policy_rev.rs"
+
+# D2bx 实体组 1（constraints / conditions / deny-notes）*_and_rebuild 写接缝 + list_* 读模型。
+[[test]]
+name = "d2bx_constraints"
+path = "tests/d2bx_constraints.rs"

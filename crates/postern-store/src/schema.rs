@@ -15,8 +15,9 @@ pub const SCHEMA_SQL: &str = include_str!("schema.sql");
 /// 迁移读库版本与之比对分三态处置（相等幂等 / 更低前向迁移 / 更高 fail-closed）。
 ///
 /// v2 起新增持久 `policy_meta` 键值表（承载单调 `policy_rev`），由 v1→v2 前向步建表
-/// 并播种 `policy_rev = 0`（见 [`crate::migrate::ddl`]）。
-pub const CURRENT_SCHEMA_VERSION: i64 = 2;
+/// 并播种 `policy_rev = 0`（见 [`crate::migrate::ddl`]）。v3 起新增 `settings` 键值表
+/// （业务级标量配置，限制性表），由 v2→v3 前向步建表（见 [`crate::migrate::ddl`]）。
+pub const CURRENT_SCHEMA_VERSION: i64 = 3;
 
 /// 持久元数据表名（v2 起）：键值对承载 store 级标量状态，当前仅 `policy_rev`。
 /// **非业务表**——无 8 基础字段、无逻辑删除语义，故不入 [`BUSINESS_TABLES`]，也不
