@@ -504,8 +504,8 @@ async fn get_health_returns_status_and_policy_rev() {
         "健康投影 status 恒 ok（进程已 serving 才命中本 handler）"
     );
     assert_eq!(
-        json.get("policy_rev").and_then(|v| v.as_u64()),
-        Some(7),
-        "policy_rev 取自当前权威快照修订号（运维对账锚点）"
+        json.get("policy_rev").and_then(|v| v.as_str()),
+        Some("7"),
+        "policy_rev 取自当前权威快照修订号、序列化为字符串（id-as-string 契约，对齐 types.ts Health）"
     );
 }

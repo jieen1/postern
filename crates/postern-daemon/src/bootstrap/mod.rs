@@ -18,6 +18,7 @@
 
 use std::fs::OpenOptions;
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
 use zeroize::Zeroizing;
@@ -76,14 +77,10 @@ pub fn init(cfg: &DaemonConfig) -> Result<()> {
     // 2) CSPRNG 取随机 32B 主密钥，即刻裹进 Zeroizing（离作用域清零，不持久持有明文）。
     let master_key = Zeroizing::new(random_master_key());
 
-    // 3) 写 keyfile，权限恰 0600（仅属主可读写）；create_new 保证不覆盖已存在文件。
+    // 3) 写 keyfile，权限恰 0600（unix 仅属主可读写；windows 经 ACL 治理，见 create_new_0600）；
+    //    create_new 保证不覆盖已存在文件。
     {
-        let mut kf = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&cfg.keyfile_path)
-            .map_err(|_| DaemonError::Boot)?;
+        let mut kf = create_new_0600(&cfg.keyfile_path)?;
         kf.write_all(master_key.as_slice())
             .map_err(|_| DaemonError::Boot)?;
         kf.sync_all().map_err(|_| DaemonError::Boot)?;
@@ -134,14 +131,24 @@ fn write_control_token(path: &std::path::Path) -> Result<()> {
         hex.push(char::from_digit(u32::from(b >> 4), 16).unwrap_or('0'));
         hex.push(char::from_digit(u32::from(b & 0x0f), 16).unwrap_or('0'));
     }
-    let mut tf = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|_| DaemonError::Boot)?;
+    let mut tf = create_new_0600(path)?;
     tf.write_all(hex.as_bytes())
         .map_err(|_| DaemonError::Boot)?;
     tf.sync_all().map_err(|_| DaemonError::Boot)?;
     Ok(())
+}
+
+/// 以「不覆盖已存在文件」语义创建一个仅属主可读写（0600 等价）的文件句柄。
+///
+/// 两平台均 `create_new(true)`（幂等拒绝覆盖现有 keyfile / token 的地基）。权限收紧按平台分流：
+/// - unix：`.mode(0o600)`（仅属主可读写——主密钥 / token 的 POSIX 权限边界）。
+/// - windows：原生 Windows 无 POSIX 模式位，文件可见性经继承的 NTFS ACL 治理（用户私有目录下
+///   默认仅本用户可访问）——故不设模式位（无等价 chmod）。这是 windows 安全模型降级的一部分，
+///   与本地 IPC 改回环 TCP + token-only 认证一致。任一步失败 fail-closed 返 [`DaemonError::Boot`]。
+fn create_new_0600(path: &std::path::Path) -> Result<std::fs::File> {
+    let mut opts = OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    opts.mode(0o600);
+    opts.open(path).map_err(|_| DaemonError::Boot)
 }

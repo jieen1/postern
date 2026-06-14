@@ -426,6 +426,7 @@ impl crate::assemble::PlaneSpawner for NeverSpawner {
 ///
 /// 两信号任一到达即返回（`tokio::select`）。信号注册失败（极少见）⇒ 退化为「永不返回」
 /// 不可行，故注册失败时立即返回让上层走正常退出路径（fail-safe：宁可早退也不卡死）。
+#[cfg(unix)]
 async fn wait_for_shutdown_signal() {
     use tokio::signal::unix::{signal, SignalKind};
     let mut sigint = match signal(SignalKind::interrupt()) {
@@ -440,4 +441,14 @@ async fn wait_for_shutdown_signal() {
         _ = sigint.recv() => {}
         _ = sigterm.recv() => {}
     }
+}
+
+/// （windows）阻塞直到收到 Ctrl-C（进程保活 → 优雅退出，§5.1 进程对外形态）。
+///
+/// 原生 Windows 无 POSIX 信号（无 SIGTERM）——以 `tokio::signal::ctrl_c` 承接交互式中断
+/// （Ctrl-C / Ctrl-Break 经控制台事件递达）。注册失败（极少见）⇒ 立即返回让上层走正常退出
+/// 路径（fail-safe：宁可早退也不卡死，与 unix 分支同纪律）。
+#[cfg(windows)]
+async fn wait_for_shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
 }

@@ -74,23 +74,44 @@ impl DataPlaneEndpoint {
         &self.data_socket_path
     }
 
-    /// 连到数据面 `data.sock`，返回一条可双向读写的 UDS 流（§3.8/§6.3）。
+    /// 连到数据面入口，返回一条可双向读写的本地 IPC 流（§3.8/§6.3）。
     ///
-    /// 复用 UDS-connect（`tokio::net::UnixStream::connect`），但目标是**数据面** socket 路径
-    /// （非控制面）。连接失败（`data.sock` 不可连 / 移除 / 无权连 / daemon 数据面未监听）→
-    /// fail-closed 为 [`CliError::DaemonUnreachable`]（L-10：中断即终止、非零退出、不绕过），
-    /// **绝不**自造任何本地 MCP 响应或回退（结构上无 store/secrets 依赖即无可绕过路径）。
+    /// 本地 IPC 按平台分流（行为等价、仅底层 socket 不同）：
+    /// - unix：连数据面 `data.sock`（UDS），权限边界为 0660/专用组（部署前置）。
+    /// - windows：连 127.0.0.1 本地回环 TCP（原生 Windows 无 UDS/专用组，数据面端口取自
+    ///   `POSTERN_DATA_PORT`，缺省 127.0.0.1:7879；与 daemon 端 cfg(windows) 数据面监听一致）。
+    ///
+    /// 连接失败（入口不可连 / 移除 / 无权连 / daemon 数据面未监听）→ fail-closed 为
+    /// [`CliError::DaemonUnreachable`]（L-10：中断即终止、非零退出、不绕过），**绝不**自造任何
+    /// 本地 MCP 响应或回退（结构上无 store/secrets 依赖即无可绕过路径）。
+    #[cfg(unix)]
     pub async fn connect(&self) -> Result<tokio::net::UnixStream, CliError> {
         // 复用 transport 同款 UDS-connect（`tokio::net::UnixStream::connect`），但目标是**数据面**
-        // socket 路径（非控制面）。任何连接失败（`data.sock` 缺失 / 移除 / 无权连 / daemon 数据面
-        // 未监听）→ fail-closed 为 [`CliError::DaemonUnreachable`]（公理二，L-10：中断即终止、非零
-        // 退出、不绕过）。**绝不**自造任何本地 MCP 响应或回退——结构上无 store/secrets 依赖即无可
-        // 绕过路径，亦不经控制面请求机制路由数据面字节。
+        // socket 路径（非控制面）。任何连接失败 → fail-closed 为 DaemonUnreachable（公理二，L-10）。
         match tokio::net::UnixStream::connect(&self.data_socket_path).await {
             Ok(stream) => Ok(stream),
             Err(_) => Err(CliError::DaemonUnreachable),
         }
     }
+
+    /// （windows）连数据面 127.0.0.1 本地回环 TCP（无 UDS）；语义与 unix 分支等价：失败即
+    /// fail-closed 为 [`CliError::DaemonUnreachable`]（L-10：中断即终止、不自造本地响应、不绕过）。
+    #[cfg(windows)]
+    pub async fn connect(&self) -> Result<tokio::net::TcpStream, CliError> {
+        match tokio::net::TcpStream::connect(data_tcp_addr()).await {
+            Ok(stream) => Ok(stream),
+            Err(_) => Err(CliError::DaemonUnreachable),
+        }
+    }
+}
+
+/// （windows）数据面本地回环 TCP 连接地址：取自 `POSTERN_DATA_PORT`，缺省 `127.0.0.1:7879`。
+///
+/// 原生 Windows 无 UDS，数据面字节桥连 127.0.0.1:<port>（daemon 端 cfg(windows) 数据面监听
+/// 同一约定）。环境变量未设 / 解析失败即落缺省（缺省与 daemon 端一致）。
+#[cfg(windows)]
+fn data_tcp_addr() -> String {
+    std::env::var("POSTERN_DATA_PORT").unwrap_or_else(|_| "127.0.0.1:7879".to_string())
 }
 
 /// 运行一次完整的 `mcp-stdio` 桥会话（§3.8，F-10/L-10）。

@@ -36,7 +36,9 @@ use postern_store::snapshot::build::build_snapshot;
 use postern_store::snapshot::view::SnapshotView;
 
 use crate::assemble::PlaneSpawner;
-use crate::boot::sockets::{create_listener_into, ListenerCell, CONTROL_PERMS, DATA_PERMS};
+use crate::boot::sockets::{
+    create_listener_into, ListenerCell, StdListener, TokioListener, CONTROL_PERMS, DATA_PERMS,
+};
 use crate::boot::{ConnectableUidProbe, HandleKind, Preconditions, RouterAssembler, SocketFactory};
 use crate::control::audit_read::JsonlAuditReader;
 use crate::control::auth::ControlAuth;
@@ -203,12 +205,14 @@ impl RealSocketFactory {
     }
 
     /// 取走已绑定的 control listener（装配期升格 `tokio::from_std` 在其上 serve；取一次后为空）。
-    pub fn take_control_listener(&self) -> Option<std::os::unix::net::UnixListener> {
+    /// 类型为平台本地 IPC std listener（unix UDS / windows 回环 TCP，见 [`StdListener`]）。
+    pub fn take_control_listener(&self) -> Option<StdListener> {
         self.control_listener.lock().ok().and_then(|mut c| c.take())
     }
 
     /// 取走已绑定的 data listener（装配期升格 `tokio::from_std` 在其上 serve；取一次后为空）。
-    pub fn take_data_listener(&self) -> Option<std::os::unix::net::UnixListener> {
+    /// 类型为平台本地 IPC std listener（unix UDS / windows 回环 TCP，见 [`StdListener`]）。
+    pub fn take_data_listener(&self) -> Option<StdListener> {
         self.data_listener.lock().ok().and_then(|mut c| c.take())
     }
 
@@ -275,18 +279,35 @@ impl RealUidProbe {
     /// `pair` / `peer_cred` 失败 → `None`：自检无法判定，调用方据此 fail-closed（不放行）。
     /// 同步签名（trait 方法 `&self -> u32` 无 async），在已有 tokio reactor 上下文内调用
     /// （`Bootstrap::run` 经异步 `run()` 承接，§5）；自连对不进 reactor 长存即用即弃。
+    #[cfg(unix)]
     fn probe_self_uid(&self) -> Option<u32> {
         let (a, _b) = tokio::net::UnixStream::pair().ok()?;
         a.peer_cred().ok().map(|cred| cred.uid())
     }
 }
 
+/// （windows）控制面 peer-uid 门的哨兵 uid。原生 Windows 无 UDS / SO_PEERCRED，无内核对端
+/// uid 可取——安全模型降级为 token-only + 仅回环可连，peer-uid 主门被旁路（见 control::auth
+/// 的 cfg(windows) 分支与 shells/listener 的 `ConnOrigin::Tcp` 构造）。`self_uid` 与注入的
+/// `PeerUid` 在 windows 同取此哨兵，使 `authenticate` 的 uid 比对恒等成立、真正的接入门只剩
+/// control-token（必验）。取 0（任意固定值即可——两端同源，比对的是「相等」而非具体值）。
+#[cfg(windows)]
+pub const WINDOWS_SENTINEL_UID: u32 = 0;
+
 impl ConnectableUidProbe for RealUidProbe {
+    #[cfg(unix)]
     fn self_uid(&self) -> u32 {
         // SO_PEERCRED 安全 API：自连对一端的 peer_cred().uid() 即本进程 uid（无 unsafe）。
         // pair / peer_cred 失败 → u32::MAX 哨兵（极罕见；自检以 self_uid 为基准，探测不到自身
         // uid 时退化为「与任何真实可连 uid 都不相等」，不误把正常部署判成同 uid 危险态）。
         self.probe_self_uid().unwrap_or(u32::MAX)
+    }
+
+    #[cfg(windows)]
+    fn self_uid(&self) -> u32 {
+        // 原生 Windows：无 SO_PEERCRED，无内核对端 uid。返回固定哨兵——peer-uid 门在 windows 被
+        // 旁路（token-only），self_uid 仅用于与同源注入的 PeerUid 比对恒成立（见 WINDOWS_SENTINEL_UID）。
+        WINDOWS_SENTINEL_UID
     }
 
     fn connectable_uids(&self) -> Vec<u32> {
@@ -503,10 +524,11 @@ impl RealSpawner {
 
     /// 取出一平面的 live listener + router，升格 tokio listener 后返回二者（由调用方择 serve 缝）。
     /// 缺 listener / router（重复 spawn / 未捕获）或升格失败 → fail-closed 返 `Err`（不放行半装配）。
+    /// listener 类型为平台 tokio 本地 IPC listener（unix UDS / windows 回环 TCP，见 [`TokioListener`]）。
     fn take_plane(
         listener: &ListenerCell,
         router: &RouterCell,
-    ) -> Result<(tokio::net::UnixListener, axum::Router)> {
+    ) -> Result<(TokioListener, axum::Router)> {
         let std_listener = listener
             .lock()
             .map_err(|_| DaemonError::Listener)?
@@ -519,7 +541,7 @@ impl RealSpawner {
             .ok_or(DaemonError::Listener)?;
         // std listener 在 sockets 绑定期已置 nonblocking（from_std 前置）。升格到 tokio reactor。
         let tokio_listener =
-            tokio::net::UnixListener::from_std(std_listener).map_err(|_| DaemonError::Listener)?;
+            TokioListener::from_std(std_listener).map_err(|_| DaemonError::Listener)?;
         Ok((tokio_listener, router))
     }
 }

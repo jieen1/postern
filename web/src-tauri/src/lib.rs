@@ -35,6 +35,7 @@ struct ControlResponse {
 }
 
 /// Resolve `control.sock` path (mirrors postern-cli `control_socket_path`).
+#[cfg(unix)]
 fn control_sock_path() -> PathBuf {
     if let Ok(p) = std::env::var("POSTERN_CONTROL_SOCK") {
         return PathBuf::from(p);
@@ -54,6 +55,51 @@ fn control_token() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// `127.0.0.1` control-plane address on Windows (no UDS): `POSTERN_CONTROL_PORT`
+/// or the daemon's default `127.0.0.1:7878`.
+#[cfg(windows)]
+fn control_tcp_addr() -> String {
+    std::env::var("POSTERN_CONTROL_PORT").unwrap_or_else(|_| "127.0.0.1:7878".to_string())
+}
+
+type Sender = hyper::client::conn::http1::SendRequest<Full<Bytes>>;
+
+/// Open the control connection and run the http1 handshake; returns the request
+/// sender + the connection-driver task. UDS on unix, loopback TCP on windows.
+#[cfg(unix)]
+async fn connect_control() -> Result<(Sender, tokio::task::JoinHandle<()>), String> {
+    let sock = control_sock_path();
+    let stream = tokio::time::timeout(TIMEOUT, tokio::net::UnixStream::connect(&sock))
+        .await
+        .map_err(|_| "daemon unreachable (connect timeout)".to_string())?
+        .map_err(|e| format!("daemon unreachable: {e}"))?;
+    handshake_spawn(TokioIo::new(stream)).await
+}
+
+#[cfg(windows)]
+async fn connect_control() -> Result<(Sender, tokio::task::JoinHandle<()>), String> {
+    let addr = control_tcp_addr();
+    let stream = tokio::time::timeout(TIMEOUT, tokio::net::TcpStream::connect(&addr))
+        .await
+        .map_err(|_| "daemon unreachable (connect timeout)".to_string())?
+        .map_err(|e| format!("daemon unreachable: {e}"))?;
+    handshake_spawn(TokioIo::new(stream)).await
+}
+
+async fn handshake_spawn<I>(io: I) -> Result<(Sender, tokio::task::JoinHandle<()>), String>
+where
+    I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+{
+    let (sender, conn) = tokio::time::timeout(TIMEOUT, hyper::client::conn::http1::handshake(io))
+        .await
+        .map_err(|_| "daemon unreachable (handshake timeout)".to_string())?
+        .map_err(|e| format!("daemon unreachable: {e}"))?;
+    let driver = tokio::spawn(async move {
+        let _ = conn.await;
+    });
+    Ok((sender, driver))
+}
+
 /// One-shot HTTP-over-UDS round-trip to the control plane. `path` is the full
 /// `/v1/...` request target (frontend prepends `API_BASE`). Any connect/IO
 /// failure or timeout becomes `Err(String)` (fail-closed — the frontend surfaces
@@ -64,8 +110,6 @@ async fn control_request(
     path: String,
     body: Option<serde_json::Value>,
 ) -> Result<ControlResponse, String> {
-    let sock = control_sock_path();
-
     // Assemble the request: method + origin-form /v1 target + optional JSON body
     // + the control-token second factor.
     let body_bytes = match &body {
@@ -83,21 +127,9 @@ async fn control_request(
         .body(Full::new(Bytes::from(body_bytes)))
         .map_err(|e| format!("bad request: {e}"))?;
 
-    // New UnixStream per call — single connection, no pool/keep-alive/retry.
-    let stream = tokio::time::timeout(TIMEOUT, tokio::net::UnixStream::connect(&sock))
-        .await
-        .map_err(|_| "daemon unreachable (connect timeout)".to_string())?
-        .map_err(|e| format!("daemon unreachable: {e}"))?;
-
-    let (mut sender, conn) =
-        tokio::time::timeout(TIMEOUT, hyper::client::conn::http1::handshake(TokioIo::new(stream)))
-            .await
-            .map_err(|_| "daemon unreachable (handshake timeout)".to_string())?
-            .map_err(|e| format!("daemon unreachable: {e}"))?;
-
-    let driver = tokio::spawn(async move {
-        let _ = conn.await;
-    });
+    // Connect + http1 handshake. One short-lived connection, no pool/keep-alive/
+    // retry. Local IPC: UDS on unix, 127.0.0.1 loopback TCP on windows.
+    let (mut sender, driver) = connect_control().await?;
 
     let response = tokio::time::timeout(TIMEOUT, sender.send_request(request))
         .await

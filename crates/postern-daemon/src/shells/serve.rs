@@ -14,10 +14,10 @@
 
 use hyper::server::conn::http1;
 use hyper_util::rt::TokioIo;
-use tokio::net::UnixListener;
 use tower::ServiceExt;
 use tower_http::catch_panic::CatchPanicLayer;
 
+use crate::boot::sockets::TokioListener;
 use crate::control::auth::{operator_of_peer, PeerUid};
 use crate::error::Result;
 use crate::shells::listener::origin_of;
@@ -29,7 +29,7 @@ use crate::shells::listener::origin_of;
 /// 完成 `bind → chmod/设属组 → listen`（L-1），本函数只在其上 serve。单条连接 accept / serve
 /// 失败不拖垮 accept 循环——记下后继续接下一条（fail-open 仅限单连接，进程整体 fail-closed：
 /// 进程不退出、不放行半装配状态）。handler panic 经 [`CatchPanicLayer`] 收成 500（不外泄）。
-pub async fn serve_router_over_uds(listener: UnixListener, router: axum::Router) -> Result<()> {
+pub async fn serve_router_over_uds(listener: TokioListener, router: axum::Router) -> Result<()> {
     // 全 router front 一层 CatchPanic：单请求 handler panic → 500 响应（不外泄、不毒化连接任务）。
     let router = router.layer(CatchPanicLayer::new());
 
@@ -70,7 +70,7 @@ pub async fn serve_router_over_uds(listener: UnixListener, router: axum::Router)
 /// router 在 serve 前已由 boot 装配期 front 认证中间件（[`with_control_auth`](crate::control::router::with_control_auth)）；
 /// 本函数只负责「每连接来源采集 + 注入」与 accept 循环，单连接 panic 经 [`CatchPanicLayer`] 收 500。
 pub async fn serve_control_router_over_uds(
-    listener: UnixListener,
+    listener: TokioListener,
     router: axum::Router,
 ) -> Result<()> {
     // 全 router front 一层 CatchPanic（与数据面同纪律：单请求 handler panic → 500，不外泄）。
@@ -90,9 +90,20 @@ pub async fn serve_control_router_over_uds(
             Err(_) => continue,
         };
         // 从来源事实析出对端 uid（主门比对值）；control/ 的中间件只读此 u32、不持来源类型。
+        // - unix：control.sock 是 UDS，来源恒 UnixPeer，取其 SO_PEERCRED uid 作主门比对值。
+        // - windows：control 是 127.0.0.1 回环 TCP，来源恒 Tcp，无内核对端 uid——peer-uid 门在
+        //   windows 被旁路（token-only），注入哨兵 uid 使中间件 uid 比对恒成立（见 boot::real
+        //   WINDOWS_SENTINEL_UID 与 control::auth 的 cfg(windows) 分支）。非预期变体 fail-closed 跳过。
+        #[cfg(unix)]
         let peer_uid = match &origin {
             postern_core::request::ConnOrigin::UnixPeer { uid, .. } => *uid,
-            // control.sock 是 UDS，理论上恒 UnixPeer；非 UnixPeer（不应发生）fail-closed 跳过。
+            _ => continue,
+        };
+        #[cfg(windows)]
+        let peer_uid = match &origin {
+            postern_core::request::ConnOrigin::Tcp { .. } => {
+                crate::boot::real::WINDOWS_SENTINEL_UID
+            }
             _ => continue,
         };
         // 已认证操作者身份：由对端 SO_PEERCRED uid 派生（control.sock 0600 + uid 主门 + token，

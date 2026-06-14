@@ -54,8 +54,10 @@ impl HttpResponse {
 //
 #[derive(Debug, Clone)]
 pub struct UdsTransport {
-    /// 目标 `control.sock` 的文件系统路径。以 hyperlocal 约定编码进 URI host 段（真实
-    /// 请求行仍用 6.5 的 `/v1/...` 路径）。
+    /// 目标 `control.sock` 的文件系统路径（unix 本地 IPC 入口）。windows 上本地 IPC 走
+    /// 127.0.0.1 TCP（连接地址取自 `POSTERN_CONTROL_PORT` 环境变量，见 [`control_tcp_addr`]），
+    /// 此路径在 windows 不参与连接——保留字段使构造签名跨平台一致（main.rs 仍传路径）。
+    #[cfg_attr(windows, allow(dead_code))]
     socket_path: std::path::PathBuf,
     /// 连接 / 读取超时。超时按 daemon 不可达类报错（§3.9）；**不**触发任何客户端重试。
     timeout: Duration,
@@ -88,28 +90,55 @@ impl UdsTransport {
         // 为 daemon 不可达——绝不静默成功、绝不本地回退（结构上无 store/secrets 回退路径，L-2）。
         let request = build_request(spec)?;
 
-        // 每次往返新建一个 `UnixStream` 连 `control.sock`——一次性短命连接，**无**连接池 /
-        // 复用（绕开 `hyper_util::client::legacy::Client` 的池化保活，避免 ≥2 次连接误判，F-3）。
-        // 连接阶段失败（socket 缺失 / 无权连 / daemon 未监听）/ 连接超时 → DaemonUnreachable。
-        let stream = match with_timeout(
-            self.timeout,
-            tokio::net::UnixStream::connect(&self.socket_path),
-        )
-        .await
-        {
-            Some(Ok(stream)) => stream,
-            _ => return Err(CliError::DaemonUnreachable),
+        // 每次往返新建一条一次性短命连接——**无**连接池 / 复用（绕开
+        // `hyper_util::client::legacy::Client` 的池化保活，避免 ≥2 次连接误判，F-3）。连接阶段
+        // 失败（入口缺失 / 无权连 / daemon 未监听）/ 连接超时 → DaemonUnreachable。
+        //
+        // 本地 IPC 传输按平台分流（行为等价、仅底层 socket 不同）：
+        // - unix：连 `control.sock`（UDS），权限边界为 0600 + SO_PEERCRED（部署前置）。
+        // - windows：连 127.0.0.1 本地回环 TCP（原生 Windows 无 UDS/SO_PEERCRED，安全模型
+        //   降级为 token-only + 仅回环可连，端口取自 `POSTERN_CONTROL_PORT`，缺省 127.0.0.1:7878）。
+        #[cfg(unix)]
+        let (mut sender, conn) = {
+            let stream = match with_timeout(
+                self.timeout,
+                tokio::net::UnixStream::connect(&self.socket_path),
+            )
+            .await
+            {
+                Some(Ok(stream)) => stream,
+                _ => return Err(CliError::DaemonUnreachable),
+            };
+            match with_timeout(
+                self.timeout,
+                hyper::client::conn::http1::handshake(TokioIo::new(stream)),
+            )
+            .await
+            {
+                Some(Ok(pair)) => pair,
+                _ => return Err(CliError::DaemonUnreachable),
+            }
         };
-
-        // 在这条单连接上做一次 HTTP/1.1 握手，拿到单发 sender 与连接驱动 future。
-        let (mut sender, conn) = match with_timeout(
-            self.timeout,
-            hyper::client::conn::http1::handshake(TokioIo::new(stream)),
-        )
-        .await
-        {
-            Some(Ok(pair)) => pair,
-            _ => return Err(CliError::DaemonUnreachable),
+        #[cfg(windows)]
+        let (mut sender, conn) = {
+            let stream = match with_timeout(
+                self.timeout,
+                tokio::net::TcpStream::connect(control_tcp_addr()),
+            )
+            .await
+            {
+                Some(Ok(stream)) => stream,
+                _ => return Err(CliError::DaemonUnreachable),
+            };
+            match with_timeout(
+                self.timeout,
+                hyper::client::conn::http1::handshake(TokioIo::new(stream)),
+            )
+            .await
+            {
+                Some(Ok(pair)) => pair,
+                _ => return Err(CliError::DaemonUnreachable),
+            }
         };
 
         // 连接驱动任务：推进这条连接的 I/O。读完整响应、sender 落地后它自然完成；不保活、不重连。
@@ -206,4 +235,14 @@ async fn round_trip_once(
 /// `None`（超时）与 `Some(Err(..))`（I/O / 协议失败）统一映射 DaemonUnreachable（§3.9）。
 async fn with_timeout<F: std::future::Future>(duration: Duration, future: F) -> Option<F::Output> {
     tokio::time::timeout(duration, future).await.ok()
+}
+
+/// （windows）控制面本地回环 TCP 连接地址：取自 `POSTERN_CONTROL_PORT`，缺省 `127.0.0.1:7878`。
+///
+/// 原生 Windows 无 UDS / SO_PEERCRED，本地 IPC 降级为 127.0.0.1 回环 TCP——daemon 的控制面
+/// 监听 127.0.0.1:<port>，cli 据同一约定连接。安全模型为 token-only + 仅回环可连（与 daemon
+/// 端 cfg(windows) 监听/认证分支一致）。环境变量解析失败 / 未设即落缺省（缺省与 daemon 端一致）。
+#[cfg(windows)]
+fn control_tcp_addr() -> String {
+    std::env::var("POSTERN_CONTROL_PORT").unwrap_or_else(|_| "127.0.0.1:7878".to_string())
 }

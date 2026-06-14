@@ -12,13 +12,18 @@ postern-core = { path = "../postern-core" }
 clap = { version = "4", features = ["derive"] }
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
-hyperlocal = "0.9"
 http-body-util = "0.1"
 bytes = "1"
 tokio = { version = "1", features = ["rt", "macros", "io-util", "io-std", "net", "time"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2"
+
+# hyperlocal 是 UDS-only（Unix-only）crate，本身无法在 Windows 目标编译；原生 Windows 端
+# 本地 IPC 走 127.0.0.1 TCP（transport/uds.rs 的 cfg(windows) 分支），不需 hyperlocal。
+# 故仅在 unix 目标声明此依赖（cli 代码从不直接 import hyperlocal，仅历史文档提及）。
+[target.'cfg(unix)'.dependencies]
+hyperlocal = "0.9"
 
 [[bin]]
 name = "postern"
