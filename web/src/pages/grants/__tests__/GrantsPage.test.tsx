@@ -272,7 +272,7 @@ describe('GrantsPage — Revoke 写流程 (确认 + 乐观锁 version + 409)', (
 
     fireEvent.click(screen.getByRole('button', { name: '吊销' }));
     const confirm = await screen.findByRole('dialog', { name: '确认吊销临时授权（收权）' });
-    expect(within(confirm).getByText(/revoked/)).toBeInTheDocument();
+    expect(within(confirm).getByText(/立即关闭/)).toBeInTheDocument();
     fireEvent.click(within(confirm).getByRole('button', { name: '确认吊销' }));
 
     await waitFor(() => expect(revokeSpy).toHaveBeenCalledTimes(1));
@@ -300,7 +300,7 @@ describe('GrantsPage — Revoke 写流程 (确认 + 乐观锁 version + 409)', (
     fireEvent.click(within(confirm).getByRole('button', { name: '确认吊销' }));
 
     expect(
-      await within(confirm).findByText(/请刷新重读最新 version 再试/),
+      await within(confirm).findByText(/请刷新重读后重试/),
     ).toBeInTheDocument();
     expect(calls).toBe(1);
     // local view unchanged on failure — the temp grant row is still present

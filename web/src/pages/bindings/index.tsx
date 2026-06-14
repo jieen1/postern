@@ -11,7 +11,6 @@
 
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { MoreVertical } from 'lucide-react';
 import {
   Badge,
   ConfirmDialog,
@@ -28,7 +27,6 @@ import {
 } from '@/api/hooks';
 import { ConflictError } from '@/api/client';
 import type { Binding, PageQuery, ScopeKind } from '@/api/types';
-import { cn } from '@/lib/cn';
 import { JsonViewer } from './JsonViewer';
 import { parseResourceSpec } from './scope';
 import { CreateBindingDrawer } from './CreateBindingDrawer';
@@ -60,8 +58,6 @@ export function BindingsPage() {
   const [detail, setDetail] = useState<Binding | null>(null);
   const [toDelete, setToDelete] = useState<Binding | null>(null);
   const [toast, setToast] = useState<string | null>(null);
-  const [menuFor, setMenuFor] = useState<string | null>(null);
-
   const bindingsQuery = useBindings(page);
   const principalsQuery = usePrincipals({ page_size: 200 });
   const rolesQuery = useRoles({ page_size: 200 });
@@ -109,8 +105,8 @@ export function BindingsPage() {
     del.mutate(
       { id: toDelete.id, version: toDelete.version },
       {
-        onSuccess: (ack) => {
-          setToast(`已删除，policy_rev 前进至 ${ack.policy_rev}`);
+        onSuccess: () => {
+          setToast('绑定已删除');
           setToDelete(null);
         },
         onError: (err) => {
@@ -185,9 +181,6 @@ export function BindingsPage() {
       <header className="flex items-start justify-between">
         <div>
           <h1 className="text-2xl font-medium">绑定 Bindings</h1>
-          <p className="mt-1 text-sm text-text-muted">
-            Principal —绑定→ Role × Scope。选择器在快照构建时展开为资源集。
-          </p>
         </div>
         <button
           type="button"
@@ -281,22 +274,30 @@ export function BindingsPage() {
           </button>
         }
         rowActions={(b) => (
-          <RowMenu
-            open={menuFor === b.id}
-            onToggle={() => setMenuFor((cur) => (cur === b.id ? null : b.id))}
-            onViewExpansion={() => {
-              setDetail(b);
-              setMenuFor(null);
-            }}
-            onViewGrants={() => {
-              setMenuFor(null);
-              navigate('/grants');
-            }}
-            onDelete={() => {
-              setToDelete(b);
-              setMenuFor(null);
-            }}
-          />
+          <div className="flex items-center justify-end gap-1">
+            <button
+              type="button"
+              aria-label={`查看绑定展开 ${b.id}`}
+              onClick={() => setDetail(b)}
+              className="rounded-card border border-border px-2 py-1 text-xs hover:bg-surface-2"
+            >
+              展开
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate('/grants')}
+              className="rounded-card border border-border px-2 py-1 text-xs hover:bg-surface-2"
+            >
+              Grants
+            </button>
+            <button
+              type="button"
+              onClick={() => setToDelete(b)}
+              className="rounded-card border border-border px-2 py-1 text-xs text-deny hover:bg-surface-2"
+            >
+              删除
+            </button>
+          </div>
         )}
       />
 
@@ -306,8 +307,8 @@ export function BindingsPage() {
         principals={principals}
         roles={roles}
         resourceOptions={resourceCodes}
-        onCreated={(rev) => {
-          setToast(`已创建，policy_rev 前进至 ${rev}`);
+        onCreated={() => {
+          setToast('绑定已创建');
         }}
       />
 
@@ -359,67 +360,3 @@ function ExpansionCount({ count }: { count: number }) {
   return <Badge className="border-border text-text-muted">{count} 资源</Badge>;
 }
 
-function RowMenu({
-  open,
-  onToggle,
-  onViewExpansion,
-  onViewGrants,
-  onDelete,
-}: {
-  open: boolean;
-  onToggle: () => void;
-  onViewExpansion: () => void;
-  onViewGrants: () => void;
-  onDelete: () => void;
-}) {
-  return (
-    <div className="relative inline-block text-left">
-      <button
-        type="button"
-        aria-label="行操作"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        onClick={onToggle}
-        className="rounded-card p-1 text-text-muted hover:bg-surface-2 hover:text-text"
-      >
-        <MoreVertical size={16} />
-      </button>
-      {open && (
-        <div
-          role="menu"
-          className="absolute right-0 z-10 mt-1 w-36 rounded-card border border-border bg-surface py-1 text-sm shadow-lg"
-        >
-          <MenuItem onClick={onViewExpansion}>查看展开</MenuItem>
-          <MenuItem onClick={onViewGrants}>查看 grants</MenuItem>
-          <MenuItem onClick={onDelete} danger>
-            删除绑定
-          </MenuItem>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function MenuItem({
-  children,
-  onClick,
-  danger,
-}: {
-  children: React.ReactNode;
-  onClick: () => void;
-  danger?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      role="menuitem"
-      onClick={onClick}
-      className={cn(
-        'block w-full px-3 py-1.5 text-left hover:bg-surface-2',
-        danger ? 'text-deny' : 'text-text',
-      )}
-    >
-      {children}
-    </button>
-  );
-}

@@ -373,10 +373,10 @@ export function GrantsPage() {
               <span className="font-mono">{selectedPrincipal}</span> 在{' '}
               <span className="font-mono">{pendingRevoke.resource}</span> 上的临时{' '}
               <span className="font-mono">{pendingRevoke.capability}</span>
-              （id {pendingRevoke.id}），end_reason='revoked'（人工）。该口子立即关闭。
+              ，立即关闭。
               {revoke.error instanceof ConflictError && (
                 <span className="mt-2 block text-warn" role="alert">
-                  他人已改该临时授权，请刷新重读最新 version 再试（409）。
+                  他人已改该临时授权，请刷新重读后重试（409）。
                 </span>
               )}
             </span>

@@ -120,8 +120,7 @@ export function DenialsTopTable() {
         )}
       />
 
-      <div className="flex items-center justify-between text-xs text-text-muted">
-        <span>仅聚合计数，方向由人裁决</span>
+      <div className="flex items-center justify-end text-xs text-text-muted">
         <Link to="/denials" className="text-info hover:underline">
           全部 → Denials
         </Link>

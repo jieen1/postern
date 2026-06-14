@@ -69,7 +69,7 @@ describe('Roles write flow — create (06-roles.md §四)', () => {
     fireEvent.click(d.getByRole('button', { name: '提交' }));
 
     await waitFor(() =>
-      expect(screen.getByText(/policy_rev 前进至 4242/)).toBeInTheDocument(),
+      expect(screen.getByText(/角色已保存/)).toBeInTheDocument(),
     );
     // The body carried the right name + direct capabilities, no version (create).
     expect(posted).toMatchObject({
@@ -141,9 +141,8 @@ describe('Roles write flow — 409 optimistic lock (§六-F)', () => {
     renderRoles();
     await findRoleRow('observer');
 
-    // open the row action menu → edit
-    fireEvent.click(screen.getByRole('button', { name: /角色 observer 操作/ }));
-    fireEvent.click(screen.getByRole('menuitem', { name: /编辑动词集/ }));
+    // Inline 编辑 button is directly visible (no dropdown needed).
+    fireEvent.click(screen.getByRole('button', { name: /编辑角色 observer/ }));
     const d = within(await screen.findByRole('dialog', { name: '编辑角色' }));
     // edit pre-fills; go straight to summary and submit.
     fireEvent.click(d.getByRole('button', { name: /预览摘要/ }));
@@ -190,11 +189,11 @@ describe('Roles delete — danger ConfirmDialog (§4.2)', () => {
     renderRoles();
     await findRoleRow('observer');
 
-    fireEvent.click(screen.getByRole('button', { name: /角色 observer 操作/ }));
-    fireEvent.click(screen.getByRole('menuitem', { name: /删除/ }));
+    // Inline 删除 button is directly visible (no dropdown needed).
+    fireEvent.click(screen.getByRole('button', { name: /删除角色 observer/ }));
     const dialog = await screen.findByRole('dialog', { name: /删除角色/ });
     const c = within(dialog);
-    expect(c.getByText(/会影响引用它的绑定的授权展开/)).toBeInTheDocument();
+    expect(c.getByText(/observer.*逻辑删除/, { selector: 'p' })).toBeInTheDocument();
 
     // Confirm without acking → no network write.
     fireEvent.click(c.getByRole('button', { name: '删除' }));
@@ -205,6 +204,6 @@ describe('Roles delete — danger ConfirmDialog (§4.2)', () => {
     fireEvent.click(c.getByRole('button', { name: '删除' }));
     await waitFor(() => expect(posted.delete_flag).toBe(1));
     expect(posted.version).toBe(4);
-    expect(await screen.findByText(/policy_rev 前进至 4250/)).toBeInTheDocument();
+    expect(await screen.findByText(/角色已保存/)).toBeInTheDocument();
   });
 });

@@ -121,10 +121,8 @@ describe('ConstraintsPage — 三态 fail-closed', () => {
     );
     renderPage();
     expect(await screen.findByText('该范围尚无对象细则')).toBeInTheDocument();
-    // The empty fact spells out what "no constraint" means.
-    expect(
-      screen.getByText(/未挂细则的动词其作用面由角色与 tier 决定/),
-    ).toBeInTheDocument();
+    // The new create button is shown in the empty state.
+    expect(screen.getByRole('button', { name: '新建细则' })).toBeInTheDocument();
   });
 
   it('deny-notes empty fact: no operator_note field when unset (skip_serializing)', async () => {
@@ -137,9 +135,8 @@ describe('ConstraintsPage — 三态 fail-closed', () => {
     await screen.findByText('table_allow');
     fireEvent.click(screen.getByRole('tab', { name: /拒绝指引 Deny-notes/ }));
     expect(await screen.findByText('尚无拒绝指引')).toBeInTheDocument();
-    expect(
-      screen.getByText(/无预写则越权响应不含 operator_note 字段/),
-    ).toBeInTheDocument();
+    // The new create button is shown in the empty state for deny-notes.
+    expect(screen.getByRole('button', { name: '新建拒绝指引' })).toBeInTheDocument();
   });
 });
 

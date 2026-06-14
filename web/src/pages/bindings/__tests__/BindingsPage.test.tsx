@@ -182,14 +182,14 @@ describe('BindingsPage — filters (do not leak hidden-row counts)', () => {
 });
 
 describe('BindingsPage — row menu navigation', () => {
-  it('opens the detail drawer via 查看展开', async () => {
+  it('opens the detail drawer via 展开', async () => {
     withBindings(ROWS);
     renderWithProviders(<BindingsPage />);
     await screen.findByText('maintainer');
 
-    const menus = screen.getAllByRole('button', { name: '行操作' });
-    fireEvent.click(menus[0]!);
-    fireEvent.click(screen.getByRole('menuitem', { name: '查看展开' }));
+    // Inline 展开 button is directly visible (no dropdown needed).
+    const expandBtns = screen.getAllByRole('button', { name: /查看绑定展开/ });
+    fireEvent.click(expandBtns[0]!);
 
     expect(await screen.findByRole('dialog', { name: '绑定展开详情' })).toBeInTheDocument();
     // The expansion result shows the daemon-reported resource code.
@@ -203,9 +203,8 @@ describe('BindingsPage — row menu navigation', () => {
     await screen.findByText('maintainer');
 
     // agent3 row (index: the second row) has an empty expansion.
-    const menus = screen.getAllByRole('button', { name: '行操作' });
-    fireEvent.click(menus[1]!);
-    fireEvent.click(screen.getByRole('menuitem', { name: '查看展开' }));
+    const expandBtns2 = screen.getAllByRole('button', { name: /查看绑定展开/ });
+    fireEvent.click(expandBtns2[1]!);
 
     const drawer = await screen.findByRole('dialog', { name: '绑定展开详情' });
     expect(within(drawer).getByText('展开为 0 个资源（无匹配标签）')).toBeInTheDocument();
@@ -227,9 +226,9 @@ describe('BindingsPage — delete (danger confirm, optimistic lock)', () => {
     renderWithProviders(<BindingsPage />);
     await screen.findByText('maintainer');
 
-    const menus = screen.getAllByRole('button', { name: '行操作' });
-    fireEvent.click(menus[0]!);
-    fireEvent.click(screen.getByRole('menuitem', { name: '删除绑定' }));
+    // Inline 删除 button is directly visible (no dropdown needed).
+    const deleteBtns = screen.getAllByRole('button', { name: '删除' });
+    fireEvent.click(deleteBtns[0]!);
 
     const dialog = await screen.findByRole('dialog', { name: '删除绑定' });
     // The summary names the resources whose grants disappear (缩权方向).
@@ -243,7 +242,7 @@ describe('BindingsPage — delete (danger confirm, optimistic lock)', () => {
     expect(confirmBtn).toBeEnabled();
     fireEvent.click(confirmBtn);
 
-    expect(await screen.findByText(/policy_rev 前进至 9001/)).toBeInTheDocument();
+    expect(await screen.findByText(/绑定已删除/)).toBeInTheDocument();
     // The read-time version was carried into the optimistic-lock write.
     expect(posted.version).toBe(3);
     expect(posted.id).toBe('7300000000000000010');
@@ -264,9 +263,9 @@ describe('BindingsPage — delete (danger confirm, optimistic lock)', () => {
     renderWithProviders(<BindingsPage />);
     await screen.findByText('maintainer');
 
-    const menus = screen.getAllByRole('button', { name: '行操作' });
-    fireEvent.click(menus[0]!);
-    fireEvent.click(screen.getByRole('menuitem', { name: '删除绑定' }));
+    // Inline 删除 button is directly visible (no dropdown needed).
+    const deleteBtns2 = screen.getAllByRole('button', { name: '删除' });
+    fireEvent.click(deleteBtns2[0]!);
     const dialog = await screen.findByRole('dialog', { name: '删除绑定' });
     fireEvent.change(within(dialog).getByRole('textbox'), { target: { value: 'DELETE' } });
     fireEvent.click(within(dialog).getByRole('button', { name: '确认删除' }));

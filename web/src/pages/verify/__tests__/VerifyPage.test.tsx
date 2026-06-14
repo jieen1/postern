@@ -152,8 +152,8 @@ describe('VerifyPage', () => {
 
     expect(await screen.findByRole('alert')).toBeInTheDocument();
     // Overall verdict is the warn "未知" state, NOT green and NOT a fabricated FAIL.
-    expect(screen.getByLabelText(/整体判定：未知（未能运行）/)).toBeInTheDocument();
-    expect(screen.getByText(/不可自检 ≠ 通过/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/整体判定：自检未能运行/)).toBeInTheDocument();
+    expect(screen.queryByText('ALL PASS')).not.toBeInTheDocument();
     expect(screen.queryByText('ALL PASS')).not.toBeInTheDocument();
     // No probe rows leaked through the error.
     expect(screen.queryByText('scope_out_mutate')).not.toBeInTheDocument();
@@ -187,7 +187,7 @@ describe('VerifyPage', () => {
 
     expect(await screen.findByRole('alert')).toBeInTheDocument();
     expect(screen.getByText(/报告不完整，判定无效/)).toBeInTheDocument();
-    expect(screen.getByLabelText(/整体判定：未知（未能运行）/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/整体判定：自检未能运行/)).toBeInTheDocument();
     // The 8 returned items are NOT rendered as a partial-green result.
     expect(screen.queryByText('ALL PASS')).not.toBeInTheDocument();
     expect(screen.queryAllByText('PASS')).toHaveLength(0);
@@ -234,7 +234,7 @@ describe('VerifyPage', () => {
     await runVerifyViaDialog();
     await screen.findByText('ALL PASS');
 
-    fireEvent.click(screen.getByText('查看本次探针在审计中的留痕'));
+    fireEvent.click(screen.getByText('查看探针审计留痕'));
     const loc = await screen.findByTestId('location');
     expect(loc).toHaveTextContent('/audit');
     expect(loc.textContent).toMatch(/principal=verify-probe/);

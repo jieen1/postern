@@ -120,9 +120,6 @@ export function VerifyPage() {
     <section className="flex flex-col gap-4">
       <header>
         <h1 className="text-2xl font-medium">红队自检 Verify</h1>
-        <p className="mt-1 font-mono text-xs text-text-muted">
-          POST /v1/verify · 对当前策略快照逐条发起应被拒探针
-        </p>
       </header>
 
       {/* ── 触发区 ── */}
@@ -168,10 +165,7 @@ export function VerifyPage() {
             )}
           </button>
         </div>
-        <p className="text-xs text-text-muted">
-          自检以临时低权 Principal 自发 9 条真实数据面请求，每条走完整管线 [0]→[10]
-          并落审计。不改任何策略。
-        </p>
+        <p className="text-xs text-text-muted">对当前策略快照发起探针，不改任何策略。</p>
       </div>
 
       {/* ── 整体判定横幅 ── */}
@@ -205,7 +199,7 @@ export function VerifyPage() {
       ) : neverRun ? (
         <EmptyState
           title="尚未运行红队自检"
-          hint="点击运行，对当前策略快照逐条验证。本页不改任何策略。"
+          hint="点击运行，对当前策略快照发起探针验证。"
           action={
             <button
               type="button"
@@ -223,9 +217,6 @@ export function VerifyPage() {
             className={cn('flex flex-col gap-2', running && 'opacity-50')}
             aria-busy={running}
           >
-            <p className="text-xs text-text-muted">
-              九项探针结果（顺序即后端 items 顺序，确定性）：
-            </p>
             {report.items.map((item) => (
               <ProbeRow key={item.name} item={item} />
             ))}
@@ -236,12 +227,9 @@ export function VerifyPage() {
               onClick={goToAudit}
               className="inline-flex items-center gap-2 rounded-card border border-border px-3 py-1.5 text-sm text-info hover:bg-surface-2"
             >
-              查看本次探针在审计中的留痕
+              查看探针审计留痕
               <ArrowRight size={14} />
             </button>
-            <p className="mt-1 text-xs text-text-muted">
-              9 条探针已逐条落审计（八项 deny、脱敏项 allow）。可跳审计复核。
-            </p>
           </div>
         </>
       ) : null}
@@ -275,31 +263,31 @@ function VerdictBanner({
       cls: 'border-border bg-surface text-text-muted',
       icon: <HelpCircle size={18} className="text-text-muted" />,
       label: '尚未运行',
-      hint: '运行后此处显示整体判定。',
+      hint: '',
     },
     running: {
       cls: 'border-border bg-surface text-text-muted',
       icon: <HelpCircle size={18} className="text-text-muted" />,
       label: '运行中…',
-      hint: '九项探针在 daemon 内串行跑完整管线，等单次响应返回。',
+      hint: '',
     },
     pass: {
       cls: 'border-allow/40 bg-allow/5 text-allow',
       icon: <CheckCircle2 size={18} className="text-allow" />,
       label: 'ALL PASS',
-      hint: '九项防线逐条按预期拒/脱敏，已逐条落审计。',
+      hint: '',
     },
     fail: {
       cls: 'border-deny/40 bg-deny/5 text-deny',
       icon: <XCircle size={18} className="text-deny" />,
       label: 'VERIFY FAILED',
-      hint: '下方 FAIL 项已标红；gap_note 指出本应卡在哪条防线。',
+      hint: '下方标红项指出具体失败位置。',
     },
     unknown: {
       cls: 'border-warn/40 bg-warn/5 text-warn',
       icon: <AlertTriangle size={18} className="text-warn" />,
-      label: '未知（未能运行）',
-      hint: '不可自检 ≠ 通过。未显示任何探针结果。',
+      label: '自检未能运行',
+      hint: '',
     },
   }[state];
 
@@ -323,7 +311,7 @@ function VerdictBanner({
           </span>
         )}
       </div>
-      <p className="text-xs text-text-muted">{visual.hint}</p>
+      {visual.hint && <p className="text-xs text-text-muted">{visual.hint}</p>}
     </div>
   );
 }

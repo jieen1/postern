@@ -113,7 +113,7 @@ describe('ModePage — 三态 fail-closed', () => {
 
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent('无法读取当前模式');
-    expect(alert).toHaveTextContent(/无法确认或更改安全状态/);
+    expect(alert).toHaveTextContent(/control\.sock 不可达/);
     // No fabricated data — there is no global card, no NORMAL badge.
     expect(screen.queryByRole('region', { name: '全局辖区' })).not.toBeInTheDocument();
     // Primary write button disabled in error state.

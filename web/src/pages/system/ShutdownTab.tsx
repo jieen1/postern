@@ -30,10 +30,7 @@ export function ShutdownTab() {
         <div className="flex items-start gap-2 text-sm">
           <AlertTriangle size={18} className="mt-0.5 shrink-0 text-deny" />
           <div className="flex flex-col gap-1">
-            <p>关停 daemon 将停止一切数据面/控制面服务，断开所有在用连接。</p>
-            <p className="text-text-muted">
-              策略状态持久于 policy.db，重启后原样恢复（TTL 按绝对墙钟继续计时）。挂起审批跨重启恒 deny。
-            </p>
+            <p>关停 daemon 将停止所有服务并断开所有连接。策略状态在重启后原样恢复。</p>
           </div>
         </div>
 
@@ -64,7 +61,7 @@ export function ShutdownTab() {
         title="确认：关停 daemon"
         confirmWord={SHUTDOWN_WORD}
         confirmLabel="关停"
-        body="关停后数据面/控制面全部停止，所有连接断开。此操作不可在 UI 内撤销。"
+        body="关停后所有服务停止，所有连接断开。此操作不可在 UI 内撤销。"
         onConfirm={doShutdown}
         onCancel={() => setConfirming(false)}
       />

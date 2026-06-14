@@ -160,9 +160,6 @@ export function RolesPage() {
       <header className="flex items-start justify-between">
         <div>
           <h1 className="text-2xl font-medium">角色 Roles</h1>
-          <p className="mt-1 text-sm text-text-muted">
-            资源无关的信任等级（动词集）。admin 不可声明、不可授予。
-          </p>
         </div>
         <button
           type="button"
@@ -177,7 +174,7 @@ export function RolesPage() {
       {/* Write-result banner (success / failure). */}
       {banner?.kind === 'ok' && (
         <div role="status" className="rounded-card border border-allow/50 bg-allow/10 px-3 py-2 text-sm text-allow">
-          角色已保存，policy_rev 前进至 {banner.policyRev}。
+          角色已保存。
         </div>
       )}
       {banner?.kind === 'err' && (
@@ -285,18 +282,12 @@ export function RolesPage() {
         body={
           deleting && (
             <div className="flex flex-col gap-2">
-              <div>
-                角色 <span className="font-mono">{deleting.name}</span> · version{' '}
-                <span className="font-mono">{deleting.version}</span>
-              </div>
+              <p>{`角色「${deleting.name}」将被逻辑删除（不可恢复）。`}</p>
               <div className="flex flex-wrap gap-1">
                 {deleting.effective.map((rc) => (
                   <CapabilityActionBadge key={rc.capability} capability={rc.capability} action={rc.action} />
                 ))}
               </div>
-              <p>
-                删除角色会影响引用它的绑定的授权展开（在「绑定 / 授权矩阵」核对）。逻辑删除是终态、不提供 undelete。
-              </p>
               <label className="flex items-center gap-2">
                 <input
                   type="checkbox"

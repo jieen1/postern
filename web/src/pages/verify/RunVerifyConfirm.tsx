@@ -49,9 +49,6 @@ export function RunVerifyConfirm({
           <p className="mb-2">本次动作摘要（不改任何策略）：</p>
           <ul className="flex list-disc flex-col gap-1 pl-5">
             <li>以临时低权 Principal 自发 9 条应被拒探针</li>
-            <li>
-              每条走完整管线 <span className="font-mono text-xs">[0]→[10]</span>，逐条落审计
-            </li>
             <li>不改任何策略（无 policy_rev 前进）</li>
             <li>
               反映当前快照（policy_rev{' '}

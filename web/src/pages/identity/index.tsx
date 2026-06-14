@@ -191,12 +191,9 @@ export function IdentityPage() {
     createPrincipal.mutate(
       { op: 'create', name: values.name.trim(), kind: values.kind },
       {
-        onSuccess: (ack) => {
+        onSuccess: () => {
           setPrincipalDrawer(false);
-          setBanner({
-            tone: 'success',
-            text: `主体已登记，policy_rev → ${ack.policy_rev}，可查看 policy_change。`,
-          });
+          setBanner({ tone: 'success', text: '主体已登记。' });
         },
         onError: (err) => setFormError(describeWriteError(err)),
       },
@@ -225,10 +222,7 @@ export function IdentityPage() {
         if (values.kind === 'api_key' && ack.api_key) {
           setRevealKey(ack.api_key);
         }
-        setBanner({
-          tone: 'success',
-          text: `凭证已创建，policy_rev → ${ack.policy_rev}，可查看 credential_event。`,
-        });
+        setBanner({ tone: 'success', text: '凭证已创建。' });
       },
       onError: (err) => setFormError(describeWriteError(err)),
     });
@@ -240,12 +234,9 @@ export function IdentityPage() {
       revokeCredential.mutate(
         { op: 'revoke', id: danger.cred.id, version: danger.cred.version },
         {
-          onSuccess: (ack) => {
+          onSuccess: () => {
             setDanger(null);
-            setBanner({
-              tone: 'success',
-              text: `凭证已吊销，热生效，policy_rev → ${ack.policy_rev}，可查看 credential_event。`,
-            });
+            setBanner({ tone: 'success', text: '凭证已吊销，即时生效。' });
           },
           onError: (err) => {
             setDanger(null);
@@ -257,9 +248,9 @@ export function IdentityPage() {
       deleteCredential.mutate(
         { op: 'delete', id: danger.cred.id, version: danger.cred.version },
         {
-          onSuccess: (ack) => {
+          onSuccess: () => {
             setDanger(null);
-            setBanner({ tone: 'success', text: `凭证已删除，policy_rev → ${ack.policy_rev}。` });
+            setBanner({ tone: 'success', text: '凭证已删除。' });
           },
           onError: (err) => {
             setDanger(null);
@@ -271,10 +262,10 @@ export function IdentityPage() {
       deletePrincipal.mutate(
         { op: 'delete', id: danger.principal.id, version: danger.principal.version },
         {
-          onSuccess: (ack) => {
+          onSuccess: () => {
             setDanger(null);
             if (selectedId === danger.principal.id) setSelectedId(null);
-            setBanner({ tone: 'success', text: `主体已删除，policy_rev → ${ack.policy_rev}。` });
+            setBanner({ tone: 'success', text: '主体已删除。' });
           },
           onError: (err) => {
             setDanger(null);
@@ -499,8 +490,7 @@ function buildDangerCopy(danger: DangerAction): {
         <div className="flex flex-col gap-2">
           <div>{revokeSummary(danger.principalName, danger.cred)}</div>
           <div className="text-deny">
-            热生效：吊销后该凭证一切认证即时被拒，正在进行的会话按 fail-closed 处理。
-            不可撤销。此操作不删除凭证记录（区别于删除），仅置吊销态。
+            即时生效，不可撤销。吊销不删除凭证记录，仅将其置为吊销态。
           </div>
         </div>
       ),

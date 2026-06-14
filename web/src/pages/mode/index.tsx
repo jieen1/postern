@@ -126,10 +126,7 @@ export function ModePage() {
         <Header onSwitch={openGlobalSwitch} disabled />
         <ErrorState
           title="无法读取当前模式"
-          message={
-            (error instanceof Error ? error.message : '请重试') +
-            ' — 控制面不可达时本页无法确认或更改安全状态。'
-          }
+          message={error instanceof Error ? error.message : '请重试'}
           onRetry={() => void refetch()}
         />
       </section>
@@ -188,10 +185,6 @@ export function ModePage() {
   return (
     <section className="flex flex-col gap-4">
       <Header onSwitch={openGlobalSwitch} />
-
-      <p className="text-sm text-text-muted">
-        当前各辖区运行模式与覆盖关系；最严者生效（freeze &gt; observe &gt; maintain &gt; normal）。
-      </p>
 
       {isLoading ? (
         <LoadingSkeleton rows={3} />

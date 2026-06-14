@@ -63,15 +63,15 @@ const PRIMARY_LABEL: Record<Segment, string> = {
 const EMPTY: Record<Segment, { title: string; hint: string }> = {
   constraints: {
     title: '该范围尚无对象细则',
-    hint: '未挂细则的动词其作用面由角色与 tier 决定，细则只会进一步收窄。',
+    hint: '',
   },
   conditions: {
     title: '尚无条件谓词',
-    hint: '无条件即该动词不受 rate_limit/time_window/mode/ttl 约束。',
+    hint: '',
   },
   'deny-notes': {
     title: '尚无拒绝指引',
-    hint: '无预写则越权响应不含 operator_note 字段（网关不代为生成话术）。',
+    hint: '',
   },
 };
 
@@ -492,17 +492,14 @@ export default function ConstraintsPage() {
         onRetry={() => void activeQ.refetch()}
         emptyTitle={empty.title}
         emptyAction={
-          <div className="flex flex-col items-center gap-2">
-            <span className="text-xs text-text-muted">{empty.hint}</span>
-            <button
-              type="button"
-              onClick={openCreate}
-              disabled={writeDisabled}
-              className="rounded-card bg-info px-3 py-1.5 text-sm text-white disabled:opacity-40"
-            >
-              {PRIMARY_LABEL[segment].replace('＋ ', '新建')}
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={openCreate}
+            disabled={writeDisabled}
+            className="rounded-card bg-info px-3 py-1.5 text-sm text-white disabled:opacity-40"
+          >
+            {PRIMARY_LABEL[segment].replace('＋ ', '新建')}
+          </button>
         }
         rowActions={(row) => (
           <div className="flex items-center justify-end gap-1">

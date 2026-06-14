@@ -101,12 +101,12 @@ export function ResourcesPage() {
   ) {
     const body = buildResourcePayload(values, editing, enableFlag);
     postResource.mutate(body, {
-      onSuccess: (ack) => {
+      onSuccess: () => {
         closeDrawer();
         setConfirm(null);
         setToast({
           tone: 'success',
-          text: `资源 ${values.code} 已${editing ? '修订' : '接入'}，policy_rev → ${ack.policy_rev}`,
+          text: `资源 ${values.code} 已${editing ? '修订' : '接入'}`,
         });
       },
       onError: (err) => {
@@ -271,7 +271,6 @@ export function ResourcesPage() {
       <header className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-medium">资源 Resources</h1>
-          <p className="mt-1 font-mono text-xs text-text-muted">GET/POST /v1/resources</p>
         </div>
         <button
           type="button"
@@ -436,11 +435,10 @@ export function ResourcesPage() {
             error={discover.error}
             onRetry={() => discover.mutate(drawer.resource.code)}
             onConfigure={() => {
-              // 圈选只产入参、跳 08；本页不落授权。Surface a hint here.
               closeDrawer();
               setToast({
                 tone: 'success',
-                text: `已带选中对象跳转细则配置（08）—— 未圈选对象一律默认拒绝`,
+                text: '探测完成，可前往细则页配置',
               });
             }}
           />

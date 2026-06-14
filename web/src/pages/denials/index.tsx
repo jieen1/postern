@@ -67,10 +67,7 @@ export function DenialsPage() {
         <div className="mt-4">
           <ErrorState
             title="无法读取拒绝聚合"
-            message={
-              errMessage(query.error) ??
-              'control 端点不可达 · 读不到 ≠ 没有 deny'
-            }
+            message={errMessage(query.error)}
             onRetry={() => query.refetch()}
           />
         </div>
@@ -122,9 +119,7 @@ function Header({
         <h1 id="denials-title" className="text-2xl font-medium">
           拒绝分析 Denials
         </h1>
-        <p className="mt-1 text-sm text-text-muted">
-          近窗口被拒请求的聚合模式 · 只呈现事实，调整由人裁决
-        </p>
+        <p className="mt-1 text-sm text-text-muted">近期被拒请求聚合</p>
       </div>
       <div className="flex items-center gap-2">
         <label className="flex items-center gap-1 text-sm text-text-muted">

@@ -45,11 +45,9 @@ describe('ApprovalsTab', () => {
     );
     renderWithQuery(<ApprovalsTab />);
 
-    expect(await screen.findByText('审批未启用，无挂起项。')).toBeInTheDocument();
+    expect(await screen.findByText('暂无挂起的审批请求')).toBeInTheDocument();
     // No adjudication control exists when disabled.
     expect(screen.queryByText('裁决')).not.toBeInTheDocument();
-    // Standing fact: approval.enabled = false is shown.
-    expect(screen.getByText('false')).toBeInTheDocument();
   });
 
   it('renders a fail-closed ErrorState (no fake rows) when the queue read fails', async () => {
@@ -77,8 +75,6 @@ describe('ApprovalsTab', () => {
 
     expect(await screen.findByText('agent3')).toBeInTheDocument();
     expect(screen.getByText('裁决')).toBeInTheDocument();
-    // 'true' standing fact rendered.
-    expect(screen.getByText('true')).toBeInTheDocument();
   });
 
   it('keeps the snowflake id as a string (no precision loss) in the table and drawer', async () => {

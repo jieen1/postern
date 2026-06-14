@@ -28,8 +28,8 @@ describe('SettingsTab', () => {
     await screen.findByText('approval.on_timeout');
     // No editable control exists for the locked key.
     expect(screen.queryByLabelText('设置 approval.on_timeout')).not.toBeInTheDocument();
-    // The on_timeout row states it is fixed and shows the deny value.
-    expect(screen.getByText(/不可配（恒为 deny）/)).toBeInTheDocument();
+    // The on_timeout row states it is read-only.
+    expect(screen.getByText(/只读/)).toBeInTheDocument();
   });
 
   it('accumulates dirty edits into "保存改动 (n)" with a summary preview', async () => {
@@ -66,7 +66,7 @@ describe('SettingsTab', () => {
     expect(posted).toEqual({
       changes: [{ key: 'audit.fsync', value: 'relaxed', version: 7 }],
     });
-    expect(await screen.findByText(/policy_rev → 4200/)).toBeInTheDocument();
+    expect(await screen.findByText(/设置已保存/)).toBeInTheDocument();
   });
 
   it('clamps audit.retention_days into [1, 3650] on the client', async () => {
@@ -154,7 +154,7 @@ describe('SettingsTab', () => {
     server.use(settingsRead([]));
     renderWithQuery(<SettingsTab />);
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('配置面异常');
+    expect(await screen.findByRole('alert')).toHaveTextContent('暂无设置项');
     expect(screen.queryByText(/保存改动/)).not.toBeInTheDocument();
   });
 });

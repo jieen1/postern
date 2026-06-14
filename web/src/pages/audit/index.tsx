@@ -58,9 +58,6 @@ export function AuditPage() {
       <header className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-medium">审计 Audit</h1>
-          <p className="mt-1 text-sm text-text-muted">
-            事件流 · 倒序（ts 新→旧）· 强制分页（后端）
-          </p>
         </div>
         <ExportMenu query={query} onExport={exportRows} disabled={isError} />
       </header>

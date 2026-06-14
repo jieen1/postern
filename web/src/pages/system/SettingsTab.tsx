@@ -67,17 +67,25 @@ export function SettingsTab() {
       </section>
     );
   }
-  if (settings.isError || !rows || rows.length === 0) {
+  if (settings.isError) {
     return (
       <section aria-label="设置" className="flex flex-col gap-3">
         <h2 className="text-lg font-medium">设置 Settings</h2>
         <ErrorState
           title="设置读取失败"
-          message={
-            settings.isError
-              ? (settings.error as Error).message
-              : '配置面异常：未读到任何设置 key（fail-closed，禁止任何写）。'
-          }
+          message={(settings.error as Error).message}
+          onRetry={() => settings.refetch()}
+        />
+      </section>
+    );
+  }
+  if (!rows || rows.length === 0) {
+    return (
+      <section aria-label="设置" className="flex flex-col gap-3">
+        <h2 className="text-lg font-medium">设置 Settings</h2>
+        <ErrorState
+          title="暂无设置项"
+          message="未读到任何可配置项，写入已禁用。"
           onRetry={() => settings.refetch()}
         />
       </section>
@@ -150,7 +158,7 @@ export function SettingsTab() {
 
       {save.isSuccess && dirtyCount === 0 && (
         <p role="status" className="text-sm text-allow">
-          已保存，policy_rev → {save.data?.policy_rev}。
+          设置已保存。
         </p>
       )}
       {conflict && (
@@ -203,9 +211,6 @@ export function SettingsTab() {
         </fieldset>
       ))}
 
-      <p className="text-xs text-text-muted">
-        未列出的 key 为系统未知 key——daemon 启动即 fail-closed 拒绝加载，无法在此新增。
-      </p>
 
       <ConfirmDialog
         open={confirming}
@@ -219,7 +224,7 @@ export function SettingsTab() {
               onChange={(e) => setRiskAck(e.target.checked)}
             />
             <span>
-              我理解：开启审批引入 pending 态；超时/重启仍恒 deny，绝不超时放行。
+              我理解：开启审批后，超时未裁决的请求将自动拒绝，不可超时放行。
             </span>
           </label>
         }
@@ -251,8 +256,8 @@ function SettingRowView({
         <span className="font-mono text-sm text-text">{row.key}</span>
         <span className="text-xs text-text-muted">
           默认 {row.default}
-          {locked ? ' · 🔒 不可配（恒为 ' + row.value + '）' : ' · 可写'}
-          {row.key === 'audit.retention_days' && ` · 钳 [1, ${RETENTION_MAX}]`}
+          {locked ? ' · 只读' : ' · 可写'}
+          {row.key === 'audit.retention_days' && ` · 范围 [1, ${RETENTION_MAX}]`}
         </span>
       </div>
       <div className="flex items-center justify-end gap-2">

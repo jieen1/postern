@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { RefreshCw, Info } from 'lucide-react';
+import { RefreshCw } from 'lucide-react';
 import {
   DataTable,
   EmptyState,
@@ -81,15 +81,6 @@ export function ApprovalsTab() {
         </button>
       </header>
 
-      <div className="flex items-start gap-2 rounded-card border border-info/40 bg-info/5 px-3 py-2 text-sm text-text-muted">
-        <Info size={16} className="mt-0.5 shrink-0 text-info" />
-        <p>
-          审批默认关闭。escalate 单元恒折叠为 deny，挂起项超时恒拒、重启恒拒。
-          当前 approval.enabled = <span className="font-mono text-text">{String(approvalEnabled)}</span>
-          （见「设置」Tab）。
-        </p>
-      </div>
-
       {approvals.isError ? (
         <ErrorState
           message={(approvals.error as Error).message}
@@ -97,8 +88,8 @@ export function ApprovalsTab() {
         />
       ) : !approvals.isLoading && (approvals.data?.total ?? 0) === 0 ? (
         <EmptyState
-          title="审批未启用，无挂起项。"
-          hint="预设决定一切——escalate 在审批关闭下即刻 deny，无需人工裁决。如需启用，去「设置」Tab 开启 approval.enabled（高危确认）。"
+          title="暂无挂起的审批请求"
+          hint={approvalEnabled ? undefined : '审批功能当前已关闭，可在「设置」Tab 开启。'}
         />
       ) : (
         <DataTable<ApprovalItem>
@@ -262,14 +253,14 @@ function AdjudicateDrawer({
           </label>
         </fieldset>
         <p className="text-xs text-text-muted">
-          超时/未裁的项恒 deny（系统侧 on_timeout=deny），无「超时放行」。
+          超时未裁的项将自动拒绝，无法超时放行。
         </p>
       </div>
 
       <ConfirmDialog
         open={confirming}
         title="确认：本次允许"
-        body="单次放行将临时为该主体扩权一次。超时/重启仍恒 deny，绝不超时放行。"
+        body="本次允许将临时为该主体放行一次，操作不可撤销。"
         onConfirm={() => {
           setConfirming(false);
           onSubmit({ id: item.id, version, decision: 'allow_once' });

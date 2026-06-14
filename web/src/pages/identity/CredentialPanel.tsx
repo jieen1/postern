@@ -1,5 +1,6 @@
 import { Plus } from 'lucide-react';
 import { EmptyState, ErrorState, LoadingSkeleton } from '../../components';
+import { ApiError } from '../../api/client';
 import type { CredentialRow, PrincipalRow } from '../../api/types';
 import { CredentialActionCard } from './CredentialActionCard';
 import { tallyCredentials } from './schema';
@@ -69,11 +70,18 @@ export function CredentialPanel({
         </div>
       ) : error ? (
         // fail-closed：错误态不显任何卡片、不把任何凭证当"生效"。
-        <ErrorState
-          title="凭证加载失败，无法确认吊销/有效状态"
-          message={error.message}
-          onRetry={onRetry}
-        />
+        isNotImplemented(error) ? (
+          <EmptyState
+            title="凭证功能暂不可用"
+            hint="该功能正在开发中，敬请期待。"
+          />
+        ) : (
+          <ErrorState
+            title="凭证加载失败，无法确认状态"
+            message={error.message}
+            onRetry={onRetry}
+          />
+        )
       ) : creds.length === 0 ? (
         <EmptyState
           title="该主体暂无网关凭证"
@@ -126,4 +134,8 @@ function CredentialList({
       </ul>
     </div>
   );
+}
+
+function isNotImplemented(error: { message?: string }): boolean {
+  return error instanceof ApiError && error.status === 501;
 }

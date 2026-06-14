@@ -106,12 +106,8 @@ export function ImportExportTab() {
         <div className="flex flex-col gap-3 rounded-card border border-border p-4">
           <h3 className="font-medium">导出 Export</h3>
           <p className="text-sm text-text-muted">
-            把当前声明式策略导出为 TOML。
+            把当前声明式策略导出为 TOML（不含凭证明文或瞬时状态）。
           </p>
-          <ul className="list-disc pl-5 text-xs text-text-muted">
-            <li>含：角色/绑定/细则/条件/资源/拒绝指引/设置（声明式部分）。</li>
-            <li>不含：凭据明文、secret_hash、真实地址、瞬时态（temp_grants/mode_state/审批挂起）。</li>
-          </ul>
           <button
             type="button"
             onClick={doExport}
@@ -131,7 +127,7 @@ export function ImportExportTab() {
         {/* ── Import ── */}
         <div className="flex flex-col gap-3 rounded-card border border-border p-4">
           <h3 className="font-medium">导入 Import</h3>
-          <p className="text-sm text-text-muted">粘贴声明式策略 TOML，先校验（dry-run）再应用。</p>
+          <p className="text-sm text-text-muted">粘贴声明式策略 TOML，先校验后应用。</p>
 
           <fieldset className="flex items-center gap-4 text-sm">
             <legend className="sr-only">导入模式</legend>

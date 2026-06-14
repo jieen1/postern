@@ -195,7 +195,7 @@ describe('ResourcesPage — write flow (form → summary → confirm → success
     fireEvent.click(within(summary).getByRole('button', { name: '确认提交' }));
 
     await waitFor(() => expect(posted).toBe(true));
-    expect(await screen.findByText(/policy_rev → 5000/)).toBeInTheDocument();
+    expect(await screen.findByText(/svc-new 已接入/)).toBeInTheDocument();
   });
 
   it('blocks summary preview when no read-only tier is declared (Zod gate)', async () => {
@@ -246,7 +246,7 @@ describe('ResourcesPage — write flow (form → summary → confirm → success
     expect(within(confirm).getByText(/mutate/)).toBeInTheDocument();
     fireEvent.click(within(confirm).getByRole('button', { name: '确认' }));
 
-    expect(await screen.findByText(/policy_rev → 5001/)).toBeInTheDocument();
+    expect(await screen.findByText(/svc-rw 已接入/)).toBeInTheDocument();
   });
 });
 
@@ -295,8 +295,9 @@ describe('ResourcesPage — disable danger flow', () => {
     renderWithProviders(<ResourcesPage />);
     await screen.findByText('db-main');
 
-    fireEvent.click(screen.getByRole('button', { name: /资源 db-main 行操作/ }));
-    fireEvent.click(screen.getByRole('menuitem', { name: '停用' }));
+    // Inline 停用 button is directly visible in the row (no dropdown needed).
+    const stopBtns = screen.getAllByRole('button', { name: '停用' });
+    fireEvent.click(stopBtns[0]!);
 
     const confirm = await screen.findByRole('dialog', { name: '停用资源' });
     const confirmBtn = within(confirm).getByRole('button', { name: '确认' });
@@ -306,7 +307,7 @@ describe('ResourcesPage — disable danger flow', () => {
     fireEvent.click(confirmBtn);
 
     await waitFor(() => expect(disabledFlag).toBe(false));
-    expect(await screen.findByText(/policy_rev → 5002/)).toBeInTheDocument();
+    expect(await screen.findByText(/db-main 已修订/)).toBeInTheDocument();
   });
 });
 
@@ -323,8 +324,9 @@ describe('ResourcesPage — discover (discovery ≠ authorization)', () => {
     renderWithProviders(<ResourcesPage />);
     await screen.findByText('db-main');
 
-    fireEvent.click(screen.getByRole('button', { name: /资源 db-main 行操作/ }));
-    fireEvent.click(screen.getByRole('menuitem', { name: '探测 discover' }));
+    // Inline 探测 button is directly visible in the row (no dropdown needed).
+    const discoverBtns = screen.getAllByRole('button', { name: '探测' });
+    fireEvent.click(discoverBtns[0]!);
 
     const drawer = await screen.findByRole('dialog', { name: /Discover: db-main/ });
     // Explicit boundary: discovery ≠ authorization.
@@ -351,8 +353,8 @@ describe('ResourcesPage — discover (discovery ≠ authorization)', () => {
     );
     renderWithProviders(<ResourcesPage />);
     await screen.findByText('db-main');
-    fireEvent.click(screen.getByRole('button', { name: /资源 db-main 行操作/ }));
-    fireEvent.click(screen.getByRole('menuitem', { name: '探测 discover' }));
+    const discoverBtns2 = screen.getAllByRole('button', { name: '探测' });
+    fireEvent.click(discoverBtns2[0]!);
 
     const drawer = await screen.findByRole('dialog', { name: /Discover: db-main/ });
     expect(await within(drawer).findByText('探测失败')).toBeInTheDocument();
