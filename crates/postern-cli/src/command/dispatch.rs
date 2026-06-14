@@ -220,6 +220,27 @@ fn render_response(response: &HttpResponse, format: Format) -> Result<String, Cl
     if let Ok(view) = parse_deny(bytes) {
         return render_deny(&view);
     }
+    // 单对象响应（如 `daemon status` 的 health `{status, policy_rev}`、`settings get`）——顶层是
+    // JSON 对象但**无** `items`（即非 `Page<T>`）→ 按 `key: value` 逐行原样转述，不当分页表格。
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_slice::<serde_json::Value>(bytes) {
+        if !map.contains_key("items") {
+            return Ok(render_flat_object(&map));
+        }
+    }
     // 否则按集合 `Page<T>` 信封渲染（表格 / jsonl）；不符共享类型契约即 `DecodeFailed`（L-3）。
     render_page_envelope(bytes, format)
+}
+
+/// 单对象响应的 `key: value` 逐行转述（值原样：字符串去引号、其余 JSON 字面）。不解释、不加工。
+fn render_flat_object(map: &serde_json::Map<String, serde_json::Value>) -> String {
+    map.iter()
+        .map(|(k, v)| {
+            let val = match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            format!("{k}: {val}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
