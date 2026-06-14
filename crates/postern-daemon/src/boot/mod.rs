@@ -22,6 +22,7 @@
 //! 本目录**绝不**构造 `ResolvedTarget`/`ResourceCredential`（boot 只解锁保险箱并建 ScrubSet，
 //! 凭据/地址物化在 connpool 请求期发生）。本目录零 SQL 标记（开库/迁移/首快照全经 store）。
 
+pub mod real;
 pub mod selfcheck;
 pub mod sockets;
 
@@ -302,8 +303,128 @@ pub fn stage_of(stage: BootStage) -> Stage {
 
 /// 进程启动入口：以真实 store/secrets 装配 [`Bootstrap`] 并驱动启动链，最后开放 data.sock。
 ///
-/// main.rs 唯一调用点；任一步失败在 socket 创建前短路并向上抛 Err（进程非零退出）。
-/// 真实前置（开库/迁移/首快照/解锁）的同步 store/secrets 调用经 `spawn_blocking` 边界承接（§5）。
-pub async fn run() -> Result<()> {
-    todo!()
+/// main.rs 唯一调用点；返回**进程退出码 u8**（main 据此 `std::process::exit`，§8 / 公理二）。
+///
+/// 流程：
+/// 1. `cfg = DaemonConfig::from_env()`；argv 子命令为 `init` ⇒ 走 [`bootstrap::init`](crate::bootstrap::init)
+///    后正常退出（[`EXIT_OK`]）；否则常规启动。
+/// 2. 构造四个 `Real*` 实现（[`RealPreconditions`](real::RealPreconditions) /
+///    [`RealSocketFactory`](real::RealSocketFactory) / [`RealUidProbe`](real::RealUidProbe) /
+///    [`RealRouterAssembler`](real::RealRouterAssembler)），驱动 [`Bootstrap::run`] 得
+///    `Result<BootReport, BootError>`。
+/// 3. 成功：从 socket 工厂 / router 装配器取出装配期捕获的 live listener / router，建
+///    [`RealSpawner`](real::RealSpawner)，经 [`run_assembled`](crate::assemble::run_assembled)
+///    把三平面 spawn 为进程对外形态、得退出码；spawn 成功（码 0）⇒ 进程**留存 serve** 直到
+///    SIGINT/SIGTERM，收到信号优雅退出（返 [`EXIT_OK`]）。
+/// 4. 失败：`run_assembled(Err(..))` 得**非零**退出码（boot 在 socket 创建前短路，data.sock 不 serving）。
+///
+/// 关键架构缝：[`Bootstrap::run`] 只产 [`BootReport`] 元数据（不带 live FD/router）。`Real*`
+/// 实现把 live listener / router 经各自内部 `Arc<Mutex<Option<_>>>` cell 暴露——本函数在
+/// `Bootstrap::run` 成功后取出建 [`RealSpawner`](real::RealSpawner)，由它 `tokio::spawn` serve。
+pub async fn run() -> u8 {
+    use crate::assemble::{run_assembled, EXIT_BOOT_FAILED, EXIT_OK};
+    use crate::config::{parse_argv, DaemonConfig, Subcommand};
+
+    let cfg = DaemonConfig::from_env();
+
+    // init 子命令：生成 keyfile + 空 vault + 已迁移 db 后正常退出（KeyFile 路径无 argon2）。
+    if parse_argv(std::env::args()) == Subcommand::Init {
+        return match crate::bootstrap::init(&cfg) {
+            Ok(()) => EXIT_OK,
+            Err(_) => EXIT_BOOT_FAILED,
+        };
+    }
+
+    // 常规启动：构造四个 Real* 实现。
+    let pre = real::RealPreconditions::new(
+        cfg.db_path.clone(),
+        cfg.vault_path.clone(),
+        cfg.keyfile_path.clone(),
+    );
+    let sockets = real::RealSocketFactory::new(
+        cfg.control_sock.clone(),
+        cfg.data_sock.clone(),
+        cfg.data_sock_group.clone(),
+    );
+    let probe = real::RealUidProbe::new(cfg.data_sock.clone());
+    // assembler 与 pre 共享首份快照 cell：装配链在 rebuild 之后调用 assemble_control_plane 时，
+    // cell 内 view 已物化（关键架构缝：Bootstrap::run 只产元数据，live view 经共享 cell 暴露）。
+    let assembler = real::RealRouterAssembler::new(pre.snapshot_cell());
+
+    // 把 live listener / router 输出 cell **在移入 Bootstrap 之前**克隆出来——Bootstrap::run 只
+    // 产 BootReport 元数据（不带 live FD/router），这些共享 cell 在 create_*/assemble_* 成功后被
+    // 填入 live 句柄，run 之后据此建 RealSpawner。
+    let control_listener_cell = sockets.control_listener_cell();
+    let data_listener_cell = sockets.data_listener_cell();
+    let control_router_cell = assembler.control_router_cell();
+    let data_router_cell = assembler.data_router_cell();
+
+    // 驱动完整启动链（开库 → 迁移 → 首快照 → 解锁 → 装配两平面 router → 先 control 后 data
+    // socket，含可连 uid 自检；任一步 Err 在 data.sock 创建前短路、fail-closed）。
+    let result = Bootstrap::new(pre, sockets, probe, assembler).run();
+
+    // 失败：run_assembled(Err) 得非零退出码，且一处平面也不 spawn（data.sock 不 serving，公理二）。
+    if result.is_err() {
+        return run_assembled(result, &never_spawner()).await;
+    }
+
+    // 成功：据装配期填入的共享 cell 建 RealSpawner（live listener/router 经此暴露给 spawner）。
+    let spawner = real::RealSpawner::new(
+        control_listener_cell,
+        data_listener_cell,
+        control_router_cell,
+        data_router_cell,
+    );
+
+    // 三平面各自独立 spawn 为进程对外形态；得退出码（spawn 失败 ⇒ 非零，不放行半装配进程形态）。
+    let code = run_assembled(result, &spawner).await;
+    if code != EXIT_OK {
+        return code;
+    }
+
+    // 进程保活：planes 已 spawn 并 serving，留存进程直到 SIGINT/SIGTERM，收到信号优雅退出。
+    wait_for_shutdown_signal().await;
+    EXIT_OK
+}
+
+/// boot 失败分支的占位 spawner：[`run_assembled`](crate::assemble::run_assembled) 在 `Err` 分支
+/// 根本不调用 `serve_assembled`，故本 spawner 的三方法永不被触达（仅满足类型）。任一方法被
+/// 意外触达即 fail-closed 返 `Err`（绝不放行半装配进程形态）。
+fn never_spawner() -> NeverSpawner {
+    NeverSpawner
+}
+
+/// 永不被触达的 spawner（boot 失败分支占位，见 [`never_spawner`]）。
+struct NeverSpawner;
+
+impl crate::assemble::PlaneSpawner for NeverSpawner {
+    fn spawn_data_plane(&self, _handles: &[HandleKind]) -> Result<()> {
+        Err(crate::error::DaemonError::Listener)
+    }
+    fn spawn_control_plane(&self, _handles: &[HandleKind]) -> Result<()> {
+        Err(crate::error::DaemonError::Listener)
+    }
+    fn spawn_sweeper(&self, _handles: &[HandleKind]) -> Result<()> {
+        Err(crate::error::DaemonError::Listener)
+    }
+}
+
+/// 阻塞直到收到 SIGINT 或 SIGTERM（进程保活 → 优雅退出，§5.1 进程对外形态）。
+///
+/// 两信号任一到达即返回（`tokio::select`）。信号注册失败（极少见）⇒ 退化为「永不返回」
+/// 不可行，故注册失败时立即返回让上层走正常退出路径（fail-safe：宁可早退也不卡死）。
+async fn wait_for_shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut sigint = match signal(SignalKind::interrupt()) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let mut sigterm = match signal(SignalKind::terminate()) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    tokio::select! {
+        _ = sigint.recv() => {}
+        _ = sigterm.recv() => {}
+    }
 }

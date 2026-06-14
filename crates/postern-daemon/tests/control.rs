@@ -358,23 +358,64 @@ async fn control_router_assembles_with_control_state_only() {
     // 装配不 panic ⇒ §6.5 端点表无重复 path、全部唯一挂载（恰覆盖的运行期佐证）。
     let app = router(state(repo, audit));
 
-    // 经一条已挂端点（GET /v1/health）发请求：命中占位 handler（NOT_IMPLEMENTED 501），
-    // 而非 404——证明该端点确被路由表挂上（路由面真实可达，非空 router）。
+    // 经一条仍占位的已挂端点（GET /v1/principals）发请求：命中占位 handler（NOT_IMPLEMENTED
+    // 501），而非 404——证明该端点确被路由表挂上（路由面真实可达，非空 router）。`/v1/health`
+    // 已接真实健康投影 handler（D1），故此处改用仍 501 的 /v1/principals 验「占位端点可达」。
     let req = axum::http::Request::builder()
         .method("GET")
-        .uri("/v1/health")
+        .uri("/v1/principals")
         .body(axum::body::Body::empty())
         .expect("request builds");
     let resp = app.oneshot(req).await.expect("router serves");
     assert_ne!(
         resp.status(),
         axum::http::StatusCode::NOT_FOUND,
-        "已挂端点 /v1/health 须可达（非 404）——证明路由确被装配"
+        "已挂端点 /v1/principals 须可达（非 404）——证明路由确被装配"
     );
     assert_eq!(
         resp.status(),
         axum::http::StatusCode::NOT_IMPLEMENTED,
         "占位 handler 回 501（缺口闭合后接真实处理器）"
+    );
+}
+
+/// D1：`GET /v1/health` 已接真实健康投影 handler——回 200 + 健康 JSON（status=ok + policy_rev），
+/// 而非 501 占位。证明控制面 health 端点真实可达且回真实投影（进程能 serve 控制面 health）。
+#[tokio::test]
+async fn health_endpoint_returns_real_health_json() {
+    use tower::ServiceExt; // oneshot
+
+    let repo = FakeRepo::new(
+        WritePlan::Ok {
+            version: 1,
+            policy_rev: 7,
+        },
+        7,
+    );
+    let audit = FakeAudit::ok();
+    let app = router(state(repo, audit));
+
+    let req = axum::http::Request::builder()
+        .method("GET")
+        .uri("/v1/health")
+        .body(axum::body::Body::empty())
+        .expect("request builds");
+    let resp = app.oneshot(req).await.expect("router serves");
+    // health 已接真：回 200（非 501 占位）。
+    assert_eq!(
+        resp.status(),
+        axum::http::StatusCode::OK,
+        "GET /v1/health 须回 200（真实健康投影，非 501 占位）"
+    );
+    // 响应体为健康 JSON：status=ok，policy_rev 取自 PolicyRepo 投影（FakeRepo rev=7）。
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body reads");
+    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("health body is JSON");
+    assert_eq!(json["status"], "ok", "health 投影 status 须为 ok");
+    assert_eq!(
+        json["policy_rev"], 7,
+        "health 投影 policy_rev 须取自 PolicyRepo（FakeRepo rev=7）"
     );
 }
 

@@ -81,9 +81,13 @@ pub fn router(state: ControlState) -> Router {
         // 路由面"恰覆盖" §6.5 在运行期成立（route 表 == 实际挂载），注入集合 = ControlState。
         // CONTROL_ROUTES 只含 GET / POST 两类动词（端点面是设计承诺，由 §6.5 表固定）；
         // 任何其它动词在端点表里不存在，fail-closed 跳过——绝不静默挂成可达端点。
-        let handler: Option<MethodRouter<ControlState>> = match *method {
-            "GET" => Some(get(stub_handler)),
-            "POST" => Some(post(stub_handler)),
+        //
+        // `GET /v1/health` 已接真实健康投影 handler（D1：进程能 serve 控制面 health）——其余
+        // 29 路由仍占位 501（D2 接真实处理器）；只此一条改真，端点面"恰覆盖"不变。
+        let handler: Option<MethodRouter<ControlState>> = match (*method, *path) {
+            ("GET", "/v1/health") => Some(get(health_handler)),
+            ("GET", _) => Some(get(stub_handler)),
+            ("POST", _) => Some(post(stub_handler)),
             _ => None,
         };
         if let Some(handler) = handler {
@@ -100,6 +104,23 @@ pub fn router(state: ControlState) -> Router {
 /// 仅用于让控制面 router 在装配点"恰覆盖" §6.5；不做任何安全决策、不触后端。
 async fn stub_handler() -> axum::http::StatusCode {
     axum::http::StatusCode::NOT_IMPLEMENTED
+}
+
+/// `GET /v1/health` 真实处理器：回控制面健康投影 JSON（D1：进程能 serve 控制面 health）。
+///
+/// 健康投影只读 [`ControlState`] 已持有的句柄——`status` 恒为常量 `"ok"`（进程已装配并 serving
+/// 才可能命中本 handler），`policy_rev` 取自 [`PolicyRepo::policy_rev`](super::PolicyRepo::policy_rev)
+/// （当前权威快照修订号，运维据此对账控制面与数据面快照一致性）。不触后端、不做安全决策、
+/// 不写库；`policy_rev` 读失败 fail-closed 折为 `null`（健康端点不因读失败误报不健康崩溃，
+/// 但也不伪报修订号——以 `null` 如实反映「修订号此刻不可读」）。
+async fn health_handler(
+    axum::extract::State(state): axum::extract::State<ControlState>,
+) -> Json<serde_json::Value> {
+    let policy_rev = state.policy.policy_rev().ok();
+    Json(serde_json::json!({
+        "status": "ok",
+        "policy_rev": policy_rev,
+    }))
 }
 
 /// 把 `POST /v1/verify` 路由接到一个真实的红队自检 runner（红队自检的路由落地）。

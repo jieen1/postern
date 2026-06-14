@@ -9,7 +9,22 @@
 //! 时序纪律：先 control.sock 后 data.sock；本单元的 [`bind_then_secure_then_listen`] 把
 //! 「bind → chmod/set-group → listen」固化为单一原子序，调用方绝不在 chmod 前 listen。
 
-use crate::error::Result;
+use std::cell::RefCell;
+use std::fs;
+use std::io::Read;
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixListener as StdUnixListener;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+
+use crate::error::{DaemonError, Result};
+
+/// 已绑定并收紧权限的 live UDS listener 输出格（`RealSocketFactory` 持有，供装配取用）。
+///
+/// `bind → secure → listen` 原子序成功后，live [`StdUnixListener`]（已置 nonblocking）存入此格；
+/// 装配期再经 `tokio::net::UnixListener::from_std` 升格为 tokio listener 在其上 serve。以
+/// `Arc<Mutex<Option<_>>>` 承载：`&self` 的工厂方法经内部可变性写入，装配方取出消费。
+pub type ListenerCell = Arc<Mutex<Option<StdUnixListener>>>;
 
 /// 单 socket 创建的三个子步骤标识（L-1 原子序的可观察单位）。
 ///
@@ -78,12 +93,135 @@ pub fn bind_then_secure_then_listen<E: SocketEffects>(eff: &E, perms: SockPerms)
     Ok(())
 }
 
-/// 创建并绑定 control.sock（0600，先于 data.sock）（占位）。
-pub async fn bind_control() -> Result<()> {
-    todo!()
+/// 真实 UDS [`SocketEffects`]：把三子步绑定到真实 `std` UDS 系统调用（无新增依赖）。
+///
+/// `bind` 经 [`StdUnixListener::bind`] 绑定路径（先清旧 inode）、`secure` 经
+/// [`fs::set_permissions`] chmod 到 `perms.mode` 并按 `perms.set_group`+组名 chown 属组、
+/// `listen` 把已收紧的 live listener 置 nonblocking 后存入 [`ListenerCell`]。`std` 绑定为同步、
+/// 不需 tokio reactor，故 `RealSocketFactory` 的同步 `create_*` 方法可在 boot 同步链内直接驱动；
+/// tokio 升格（`from_std`）推迟到装配/serve 期（彼时已在 async 上下文）。
+struct RealSocketEffects<'a> {
+    /// 目标 UDS 路径。
+    path: &'a Path,
+    /// 专用属组名（`None` 则不设组；`perms.set_group` 同时为真才 chown）。
+    group: Option<&'a str>,
+    /// `bind` 与 `listen` 间暂存已绑定 listener（`&self` 三步经内部可变性承接）。
+    bound: RefCell<Option<StdUnixListener>>,
+    /// `listen` 成功后 live listener 的去处（工厂的输出格）。
+    out: &'a ListenerCell,
 }
 
-/// 创建并开放 data.sock（0660/组，启动序列最后一步、整链唯一收尾动作）（占位）。
-pub async fn open_data() -> Result<()> {
-    todo!()
+impl<'a> RealSocketEffects<'a> {
+    fn new(path: &'a Path, group: Option<&'a str>, out: &'a ListenerCell) -> Self {
+        Self {
+            path,
+            group,
+            bound: RefCell::new(None),
+            out,
+        }
+    }
+}
+
+impl SocketEffects for RealSocketEffects<'_> {
+    fn bind(&self) -> Result<()> {
+        // 清理旧 inode（残留 UDS 文件会令 bind 报 AddrInUse）；不存在则忽略。坏父目录 → bind
+        // 失败 → fail-closed 返 Listener（绝不带半绑定状态前进）。
+        let _ = fs::remove_file(self.path);
+        let listener = StdUnixListener::bind(self.path).map_err(|_| DaemonError::Listener)?;
+        *self.bound.borrow_mut() = Some(listener);
+        Ok(())
+    }
+
+    fn secure(&self, perms: SockPerms) -> Result<()> {
+        // 立即 chmod 到目标模式位——紧接 bind、先于 listen，关闭 umask 竞态窗口（L-1）。
+        fs::set_permissions(self.path, fs::Permissions::from_mode(perms.mode))
+            .map_err(|_| DaemonError::Listener)?;
+        // 按需设专用属组：仅当要求设组且给定组名时 chown gid（gid 经 /etc/group 解析，纯 std
+        // 文件读、无 libc）。组名给定却解析不到 → fail-closed（绝不静默放弃专用组隔离）。
+        if perms.set_group {
+            if let Some(name) = self.group {
+                let gid = resolve_gid(name).ok_or(DaemonError::Listener)?;
+                chown_group(self.path, gid)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn listen(&self) -> Result<()> {
+        // std UDS 在 bind 时已进入 listen 态；本步把权限已收紧的 live listener 置 nonblocking
+        // （供后续 tokio from_std 升格）后存入输出格。仅在 secure 之后执行（原子序保证）。
+        let listener = self
+            .bound
+            .borrow_mut()
+            .take()
+            .ok_or(DaemonError::Listener)?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|_| DaemonError::Listener)?;
+        *self.out.lock().map_err(|_| DaemonError::Listener)? = Some(listener);
+        Ok(())
+    }
+}
+
+/// 解析组名 → gid（读 `/etc/group`，纯 std、无 libc 依赖）。未找到返 `None`。
+fn resolve_gid(name: &str) -> Option<u32> {
+    let mut contents = String::new();
+    fs::File::open("/etc/group")
+        .ok()?
+        .read_to_string(&mut contents)
+        .ok()?;
+    for line in contents.lines() {
+        // 格式：name:passwd:gid:members
+        let mut fields = line.split(':');
+        let group_name = fields.next()?;
+        let _passwd = fields.next();
+        let gid_str = fields.next()?;
+        if group_name == name {
+            return gid_str.parse().ok();
+        }
+    }
+    None
+}
+
+/// chown 一个路径到 `gid`（uid 保持不变，传 `u32::MAX` 即「不改 owner」语义）。
+///
+/// 经 `std::os::unix::fs::chown`（std ≥1.73，无 libc/nix）。失败 → fail-closed 返 Listener。
+fn chown_group(path: &Path, gid: u32) -> Result<()> {
+    std::os::unix::fs::chown(path, None, Some(gid)).map_err(|_| DaemonError::Listener)
+}
+
+/// 在 `path` 上以 `perms`/`group` 跑 `bind → secure → listen` 原子序，live listener 存入 `out`。
+///
+/// 同步核：经 [`RealSocketEffects`] 把三子步绑真实 std UDS 系统调用，再交
+/// [`bind_then_secure_then_listen`] 固化原子序。`RealSocketFactory` 两个 `create_*` 方法与下面
+/// 两个 async 包装都收敛到此函数，确保 control/data 两平面走完全一致的绑定收紧时序。
+pub fn create_listener_into(
+    path: &Path,
+    group: Option<&str>,
+    perms: SockPerms,
+    out: &ListenerCell,
+) -> Result<()> {
+    let eff = RealSocketEffects::new(path, group, out);
+    bind_then_secure_then_listen(&eff, perms)
+}
+
+/// 创建并绑定 control.sock 于 `path`（0600，先于 data.sock），live listener 存入 `out`。
+///
+/// 经 [`create_listener_into`] 在 `path` 上固化 `bind → 立即 chmod 0600 → listen` 原子序
+/// （[`CONTROL_PERMS`]，不设专用组）。绑定 / chmod 失败即 fail-closed 短路。
+pub async fn bind_control(path: &Path, perms: SockPerms, out: &ListenerCell) -> Result<()> {
+    create_listener_into(path, None, perms, out)
+}
+
+/// 创建并开放 data.sock 于 `path`（0660 + 可选专用组），live listener 存入 `out`。
+///
+/// 经 [`create_listener_into`] 在 `path` 上固化 `bind → 立即 chmod 0660 + 设专用组（`group`
+/// 为 `Some` 时）→ listen` 原子序（[`DATA_PERMS`]）。整链终结动作，仅在可连 uid 自检通过后调用。
+pub async fn open_data(
+    path: &Path,
+    group: Option<&str>,
+    perms: SockPerms,
+    out: &ListenerCell,
+) -> Result<()> {
+    create_listener_into(path, group, perms, out)
 }

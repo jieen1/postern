@@ -17,6 +17,8 @@
 
 pub mod assemble;
 pub mod boot;
+pub mod bootstrap;
+pub mod config;
 pub mod connpool;
 pub mod control;
 pub mod error;

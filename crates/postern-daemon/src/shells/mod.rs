@@ -18,6 +18,7 @@
 pub mod http;
 pub mod listener;
 pub mod mcp;
+pub mod serve;
 
 use std::sync::Arc;
 

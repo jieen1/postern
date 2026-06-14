@@ -39,6 +39,11 @@ anyhow = "1"
 # 凭据 secret_hash（PHC 串）；非 id/SQL 库，不在任何契约封禁名单（与 secrets crate 同
 # argon2 0.5，已在 workspace lock 内）。
 argon2 = "0.5"
+# D1 解锁路径：boot RealPreconditions::unlock_vault / bootstrap::init 须把主密钥裹进
+# Zeroizing<[u8; 32]> 才能喂 secrets 的 KeyFile::new / Payload::write_atomic（secrets API
+# 强制 Zeroizing 参数）。从 [dev-dependencies] 移入此处（与 secrets crate 同 zeroize 1.8，
+# 已在 workspace lock 内）；非 id/SQL 库，不在任何契约封禁名单。
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
 
 # 二进制组装点：posternd（data.sock 数据面 + control.sock 控制面）。
 [[bin]]
@@ -70,11 +75,40 @@ path = "tests/shells.rs"
 name = "assembly-main"
 path = "tests/assembly.rs"
 
+# D1 config 单元：DaemonConfig::from_env env 优先级 + 缺省路径（XDG/run 兜底）+ parse_argv
+# 子命令解析（init|run，缺省 run，不引 clap）。
+[[test]]
+name = "d1-config"
+path = "tests/d1_config.rs"
+
+# D1 init 单元：bootstrap::init 在临时目录生成 keyfile(0600) + 可解锁空 vault + 已迁移 db；
+# 重复 init 拒绝覆盖（幂等 fail-closed）；KeyFile 路径无 argon2（可直接跑）。
+[[test]]
+name = "d1-init"
+path = "tests/d1_init.rs"
+
+# D1 preconditions 单元：RealPreconditions 对真实 db + keyfile vault 四前置全 Ok；坏 vault →
+# unlock_vault Err（fail-closed）。
+[[test]]
+name = "d1-preconditions"
+path = "tests/d1_preconditions.rs"
+
+# D1 socket-factory 单元：RealSocketFactory create_control(0600)/create_data(0660) 建 UDS；
+# 坏路径 Err（fail-closed）。
+[[test]]
+name = "d1-socket-factory"
+path = "tests/d1_socket_factory.rs"
+
+# D1 uid-probe 单元：self_uid()==进程 uid（SO_PEERCRED 安全 API）；connectable_uids 含自身。
+[[test]]
+name = "d1-uid-probe"
+path = "tests/d1_uid_probe.rs"
+
 [dev-dependencies]
 postern-core = { path = "../postern-core" }
 postern-secrets = { path = "../postern-secrets" }
 # 仅测试用：以 #[async_trait] 实现 core 的 Adapter/Transport Fake（与下游 crate 定义
 # 这些 trait 时同一脱糖宏；非禁用 id/SQL 库，已在 workspace 锁内）。
 async-trait = "0.1"
-# 测试夹具用 Zeroizing 喂 Payload::from_plaintext 以构造真实 ScrubSet 句柄（机密面 API）。
-zeroize = { version = "1.8", features = ["zeroize_derive"] }
+# zeroize 已移入 [dependencies]（D1 解锁路径 boot/bootstrap 非测试代码亦需）——dev 测试
+# 夹具经 [dependencies] 同一份可用，无需在此重复声明。
