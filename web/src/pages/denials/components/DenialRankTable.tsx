@@ -117,10 +117,7 @@ export function DenialRankTable({
             ) : sortedRows.length === 0 ? (
               <tr>
                 <td colSpan={8} className="p-0">
-                  <EmptyState
-                    title="该窗口内无被拒事件"
-                    hint="这是真实的好消息（非错误）。可去 Verify 页主动自检，或放宽窗口范围。"
-                  />
+                  <EmptyState title="该窗口内无被拒事件" />
                 </td>
               </tr>
             ) : (

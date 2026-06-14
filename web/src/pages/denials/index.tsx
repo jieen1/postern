@@ -119,7 +119,6 @@ function Header({
         <h1 id="denials-title" className="text-2xl font-medium">
           拒绝分析 Denials
         </h1>
-        <p className="mt-1 text-sm text-text-muted">近期被拒请求聚合</p>
       </div>
       <div className="flex items-center gap-2">
         <label className="flex items-center gap-1 text-sm text-text-muted">

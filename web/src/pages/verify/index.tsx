@@ -165,7 +165,6 @@ export function VerifyPage() {
             )}
           </button>
         </div>
-        <p className="text-xs text-text-muted">对当前策略快照发起探针，不改任何策略。</p>
       </div>
 
       {/* ── 整体判定横幅 ── */}
@@ -199,7 +198,6 @@ export function VerifyPage() {
       ) : neverRun ? (
         <EmptyState
           title="尚未运行红队自检"
-          hint="点击运行，对当前策略快照发起探针验证。"
           action={
             <button
               type="button"

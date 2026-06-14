@@ -58,7 +58,6 @@ export function AuditList({
         ) : pairs.length === 0 ? (
           <EmptyState
             title="当前筛选无匹配事件"
-            hint="空 ≠ 错：此筛选下确实没有审计事件。"
             action={
               onClearFilters && (
                 <button

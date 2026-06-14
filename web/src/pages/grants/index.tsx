@@ -270,7 +270,6 @@ export function GrantsPage() {
         ) : filteredRows.length === 0 ? (
           <EmptyState
             title={`${selectedPrincipal ?? '该主体'} 当前无任何生效授权（默认拒绝世界）`}
-            hint="这是合法的安全态（无授权格 = 全拒）。可对其 Elevate 临时提权。"
           />
         ) : (
           <GrantMatrix rows={filteredRows} now={now} onSelectCell={setCellDrawer} />

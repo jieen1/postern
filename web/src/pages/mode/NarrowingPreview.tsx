@@ -49,7 +49,7 @@ export function NarrowingPreview({ mode }: { mode: Mode }) {
         className="flex w-full items-center gap-2 px-4 py-3 text-left text-sm font-medium hover:bg-surface-2"
       >
         {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-        收窄影响预览（按 {mode} 模式对比 RBAC 原始动词 vs 剩余动词）
+        收窄影响预览
       </button>
 
       {open && (
@@ -63,10 +63,7 @@ export function NarrowingPreview({ mode }: { mode: Mode }) {
               onRetry={() => void refetch()}
             />
           ) : entries.length === 0 ? (
-            <EmptyState
-              title="无可对比的授权数据"
-              hint="当前作用域内无 your_grants 数据；按 fail-closed 显空，不补默认。"
-            />
+            <EmptyState title="无可对比的授权数据" />
           ) : (
             <table className="w-full border-collapse text-sm">
               <thead>

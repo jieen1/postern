@@ -106,10 +106,6 @@ export function LadderGraph({ roles }: { roles: Role[] }) {
           ))
         )}
       </div>
-
-      <p className="border-t border-border pt-2 text-xs text-text-muted">
-        destroy 不进任何角色——经单格 + TTL 在授权矩阵显式授予。
-      </p>
     </section>
   );
 }

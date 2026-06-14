@@ -119,14 +119,12 @@ describe('Roles page — render & ladder (06-roles.md §六.1)', () => {
     expect(row.getByText('0')).toBeInTheDocument();
   });
 
-  it('renders the read-only LadderGraph with the inherits edges and the destroy footnote', async () => {
+  it('renders the read-only LadderGraph with the inherits edges and the narrow roles', async () => {
     renderRoles();
     const ladder = await screen.findByRole('region', { name: '继承阶梯' });
     const l = within(ladder);
     // Two inherits arrows between the three rungs.
     expect(l.getAllByLabelText('inherits').length).toBeGreaterThanOrEqual(2);
-    // The fixed fact footnote.
-    expect(l.getByText(/destroy 不进任何角色/)).toBeInTheDocument();
     // The floating narrow role appears in the ladder's narrow section.
     expect(l.getByText('log-observer')).toBeInTheDocument();
   });

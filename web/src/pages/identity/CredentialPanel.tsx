@@ -41,10 +41,7 @@ export function CredentialPanel({
     return (
       <section aria-label="凭证" className="flex h-full flex-col">
         <h2 className="mb-3 text-lg font-medium">凭证 Credentials</h2>
-        <EmptyState
-          title="选择左侧一个主体查看其网关凭证"
-          hint="每个主体的网关凭证（local_process / api_key / token）在此登记与吊销。"
-        />
+        <EmptyState title="选择左侧一个主体查看其网关凭证" />
       </section>
     );
   }
@@ -71,10 +68,7 @@ export function CredentialPanel({
       ) : error ? (
         // fail-closed：错误态不显任何卡片、不把任何凭证当"生效"。
         isNotImplemented(error) ? (
-          <EmptyState
-            title="凭证功能暂不可用"
-            hint="该功能正在开发中，敬请期待。"
-          />
+          <EmptyState title="凭证功能暂不可用（开发中）" />
         ) : (
           <ErrorState
             title="凭证加载失败，无法确认状态"
@@ -83,10 +77,7 @@ export function CredentialPanel({
           />
         )
       ) : creds.length === 0 ? (
-        <EmptyState
-          title="该主体暂无网关凭证"
-          hint="新建后该主体方能经网关认证。"
-        />
+        <EmptyState title="该主体暂无网关凭证" />
       ) : (
         <CredentialList
           creds={creds}
